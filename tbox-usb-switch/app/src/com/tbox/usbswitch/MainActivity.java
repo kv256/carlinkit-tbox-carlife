@@ -38,6 +38,9 @@ public class MainActivity extends Activity {
     private static final String PROP_AUDIO_MEDIA = "persist.tbox.carlife.audio.media";
     private static final String PROP_AUDIO_NAVI = "persist.tbox.carlife.audio.navi";
     private static final String PROP_AUDIO_CALL = "persist.tbox.carlife.audio.call";
+    private static final String PROP_AEC = "persist.tbox.carlife.aec";
+    private static final String[] AEC_VALUES = {"off", "1", "2", "3"};
+    private static final String[] AEC_LABELS = {"关", "弱", "中", "强"};
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -52,6 +55,7 @@ public class MainActivity extends Activity {
     private TextView mediaUsbBtn, mediaBtBtn;
     private TextView naviUsbBtn, naviBtBtn;
     private TextView callUsbBtn, callBtBtn;
+    private final TextView[] aecBtns = new TextView[4];
 
     private volatile int currentMode = MODE_CARPLAY;
     private volatile boolean currentWifiAdbOn = false;
@@ -119,7 +123,7 @@ public class MainActivity extends Activity {
         left.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("Carlinkit Tbox 三模式与音频路由 · v1.4");
+        sub.setText("Carlinkit Tbox 三模式与音频路由 · v1.5");
         sub.setTextColor(Color.parseColor("#94A3B8"));
         sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         sub.setPadding(0, dp(2), 0, dp(10));
@@ -259,9 +263,11 @@ public class MainActivity extends Activity {
         naviBtBtn = naviBtns[1];
 
         TextView[] callBtns = new TextView[2];
-        segRow.addView(makeAudioRouteColumn("电话音频", "推荐 USB；蓝牙需手机直连车机", PROP_AUDIO_CALL, "电话音频", callBtns, false));
+        segRow.addView(makeAudioRouteColumn("电话音频", "推荐 USB；蓝牙需手机直连车机", PROP_AUDIO_CALL, "电话音频", callBtns, true));
         callUsbBtn = callBtns[0];
         callBtBtn = callBtns[1];
+
+        segRow.addView(makeAecColumn());
 
         audioPanel.addView(segRow);
         right.addView(audioPanel);
@@ -366,6 +372,70 @@ public class MainActivity extends Activity {
         outBtns[0] = usbBtn;
         outBtns[1] = btBtn;
         return col;
+    }
+
+    /** USB call echo cancellation strength (read by MdMain at the start of each call). */
+    private LinearLayout makeAecColumn() {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setGravity(Gravity.CENTER_VERTICAL);
+        col.setPadding(dp(10), dp(6), dp(10), dp(6));
+        col.setBackground(roundRect(Color.parseColor("#0F172A"), 10, Color.parseColor("#334155"), 1));
+        col.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+
+        TextView t = new TextView(this);
+        t.setText("通话回声消除");
+        t.setTextColor(Color.WHITE);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        col.addView(t);
+
+        TextView s = new TextView(this);
+        s.setText("USB 电话；下一通电话生效");
+        s.setTextColor(Color.parseColor("#94A3B8"));
+        s.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        s.setPadding(0, dp(1), 0, dp(6));
+        col.addView(s);
+
+        LinearLayout btnRow = new LinearLayout(this);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnRow.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        for (int i = 0; i < AEC_VALUES.length; i++) {
+            final String value = AEC_VALUES[i];
+            final String label = AEC_LABELS[i];
+            TextView b = makeToggleBtn(label);
+            b.setOnClickListener(v -> {
+                if (!ensureRootOrPrompt()) return;
+                runRootCommand("setprop " + PROP_AEC + " " + value, "通话回声消除 → " + label + "（下一通电话生效）");
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            if (i < AEC_VALUES.length - 1) lp.setMargins(0, 0, dp(4), 0);
+            b.setLayoutParams(lp);
+            btnRow.addView(b);
+            aecBtns[i] = b;
+        }
+        col.addView(btnRow);
+        return col;
+    }
+
+    private void styleAec(String value) {
+        String v = value == null || value.trim().isEmpty() ? "2" : value.trim().toLowerCase(Locale.US);
+        if (v.equals("0") || v.equals("false")) v = "off";
+        boolean known = false;
+        for (String a : AEC_VALUES) if (a.equals(v)) known = true;
+        if (!known) v = "2";
+        for (int i = 0; i < AEC_VALUES.length; i++) {
+            TextView b = aecBtns[i];
+            if (b == null) continue;
+            if (AEC_VALUES[i].equals(v)) {
+                b.setBackground(roundRect(Color.parseColor("#7C3AED"), 8, Color.parseColor("#A78BFA"), 1));
+                b.setTextColor(Color.WHITE);
+            } else {
+                b.setBackground(roundRect(Color.parseColor("#1E293B"), 8, Color.parseColor("#334155"), 1));
+                b.setTextColor(Color.parseColor("#94A3B8"));
+            }
+        }
     }
 
     private TextView makeToggleBtn(String text) {
@@ -515,6 +585,7 @@ public class MainActivity extends Activity {
             String pMedia = getProp(PROP_AUDIO_MEDIA);
             String pNavi = getProp(PROP_AUDIO_NAVI);
             String pCall = getProp(PROP_AUDIO_CALL);
+            String pAec = getProp(PROP_AEC);
             String usbState = getProp("sys.usb.state");
             String usbConfig = getProp("sys.usb.config");
             String tcpPort = getProp("service.adb.tcp.port");
@@ -580,6 +651,7 @@ public class MainActivity extends Activity {
                 styleTogglePair(mediaUsbBtn, mediaBtBtn, mUsb);
                 styleTogglePair(naviUsbBtn, naviBtBtn, nUsb);
                 styleTogglePair(callUsbBtn, callBtBtn, cUsb);
+                styleAec(pAec);
 
                 String ipText = ip.isEmpty() ? "未连接 Wi-Fi" : ip;
                 String wifiAdbText = wifiOn
