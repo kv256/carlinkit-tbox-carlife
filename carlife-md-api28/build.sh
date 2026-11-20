@@ -6,6 +6,10 @@ REPO="$(cd "$DIR/.." && pwd)"
 SDK="${ANDROID_SDK_DIR:-$REPO/../tools/android-sdk}"
 ANDROID_JAR="$SDK/platforms/android-28/android.jar"
 D8="$SDK/build-tools/d8"
+if [ ! -x "$D8" ]; then
+    # Standard SDK layout: build-tools/<version>/d8 (pick the newest)
+    D8="$(ls -d "$SDK"/build-tools/*/d8 2>/dev/null | sort -V | tail -1)"
+fi
 JAVAC="${JAVAC_BIN:-$(command -v javac || echo $HOME/.sdkman/candidates/java/current/bin/javac)}"
 
 rm -rf "$DIR/build/stubs" "$DIR/build/classes" "$DIR/build/carlife-md-api28.jar"
@@ -26,4 +30,4 @@ mkdir -p "$DIR/build/stubs" "$DIR/build/classes"
     $(find "$DIR/build/classes" -name '*.class')
 
 ls -lh "$DIR/build/carlife-md-api28.jar"
-sha256sum "$DIR/build/carlife-md-api28.jar"
+if command -v sha256sum >/dev/null 2>&1; then sha256sum "$DIR/build/carlife-md-api28.jar"; else shasum -a 256 "$DIR/build/carlife-md-api28.jar"; fi

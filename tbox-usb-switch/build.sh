@@ -5,6 +5,11 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$DIR/.." && pwd)"
 SDK="${ANDROID_SDK_DIR:-$REPO/../tools/android-sdk}"
 BT="$SDK/build-tools"
+if [ ! -x "$BT/aapt2" ]; then
+  # Standard SDK layout: build-tools/<version>/ (pick the newest)
+  BT="$(ls -d "$SDK"/build-tools/*/ 2>/dev/null | sort -V | tail -1)"
+  BT="${BT%/}"
+fi
 ANDROID_JAR="$SDK/platforms/android-28/android.jar"
 JAVAC="${JAVAC_BIN:-$(command -v javac || echo $HOME/.sdkman/candidates/java/current/bin/javac)}"
 KEYSTORE="${TBOX_KEYSTORE:-$REPO/.keystore/usbswitch-release.jks}"
@@ -72,4 +77,4 @@ fi
 
 "$BT/apksigner" verify --verbose "$OUT_APK" >/dev/null
 ls -lh "$OUT_APK"
-sha256sum "$OUT_APK"
+if command -v sha256sum >/dev/null 2>&1; then sha256sum "$OUT_APK"; else shasum -a 256 "$OUT_APK"; fi
