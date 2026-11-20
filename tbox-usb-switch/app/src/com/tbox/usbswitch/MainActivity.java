@@ -119,7 +119,7 @@ public class MainActivity extends Activity {
         left.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("Carlinkit Tbox 三模式与音频路由 · v1.3");
+        sub.setText("Carlinkit Tbox 三模式与音频路由 · v1.4");
         sub.setTextColor(Color.parseColor("#94A3B8"));
         sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         sub.setPadding(0, dp(2), 0, dp(10));
@@ -259,7 +259,7 @@ public class MainActivity extends Activity {
         naviBtBtn = naviBtns[1];
 
         TextView[] callBtns = new TextView[2];
-        segRow.addView(makeAudioRouteColumn("电话音频", "通话声音 + 通话麦", PROP_AUDIO_CALL, "电话音频", callBtns, false));
+        segRow.addView(makeAudioRouteColumn("电话音频", "推荐 USB；蓝牙需手机直连车机", PROP_AUDIO_CALL, "电话音频", callBtns, false));
         callUsbBtn = callBtns[0];
         callBtBtn = callBtns[1];
 
@@ -354,7 +354,10 @@ public class MainActivity extends Activity {
         btnRow.addView(usbBtn);
 
         TextView btBtn = makeToggleBtn("蓝牙");
-        btBtn.setOnClickListener(v -> setAudioRoute(propKey, "bt", toastLabel + " → 蓝牙 (车机/QCOM-BTD)"));
+        String btToast = PROP_AUDIO_CALL.equals(propKey)
+                ? toastLabel + " → 蓝牙 (需手机直连车机)"
+                : toastLabel + " → 蓝牙 (车机/QCOM-BTD)";
+        btBtn.setOnClickListener(v -> setAudioRoute(propKey, "bt", btToast));
         LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
         btBtn.setLayoutParams(lp2);
         btnRow.addView(btBtn);

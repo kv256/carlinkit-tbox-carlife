@@ -8,11 +8,12 @@
 
 ### 新增文件（4 个）
 1. `Api28DisplayMirror.java` — 适配 Android 9（API 28）无 `DisplayControl` / `createDisplay` 签名的虚拟屏镜像捕获层（`SurfaceControl.createDisplay` + `setDisplayProjection` + `openTransaction/closeTransaction`）。
-2. `Api28MicBridge.java` — Android 9 车机麦克风回传桥接与蓝牙 HFP SCO 触发器：
+2. `Api28MicBridge.java` — Android 9 车机麦克风回传桥接：
    - 注册 `AudioPolicy` 录音注入 Mix（16kHz 单声道），覆盖 `MIC(1)` / `VOICE_RECOGNITION(6)` / `VOICE_COMMUNICATION(7)` / `UNPROCESSED(9)`；
-   - 按会话延迟创建/释放 `AudioTrack`（`lazy_per_session`）+ `headPos` 停滞自动恢复看门狗；
+   - 按会话延迟创建/释放 `AudioTrack`（`lazy_per_session`）+ `headPos` 停滞自动恢复（仅重建 `AudioTrack`，绝不在外部录音器存活期间注销 `AudioPolicy`，根治 Android 9 `AudioPolicyManager::stopInput()` UAF `SIGSEGV`）；
+   - 通过反射直接调用 `AudioTrack.startImpl()` 启动虚拟麦注入轨道，绕过盒子原厂 `framework.jar` 中 `DesonAudioTrack` 在 `AudioTrack.play()` 内的拦截逻辑（当 `sys.phonecall.state=1` 通话期间非 `com.suding.speedplay` 进程的 `play()` 会被直接静默 `return`），同时避免污染 `SudingMediaFocusControl.rawAudioWriter`；
    - 记录活跃录音包名（`activeRecorderPkg`）供方向盘语音键切换判断；
-   - `call=bt` 时排除 `uid=0` 与 `preset 7` 并尝试开启 `AudioManager` HFP SCO。
+   - `call=bt` 时排除 `uid=0` 与 `preset 7`，交由手机直连车机原车蓝牙处理（不再触发无效的 `QCOM-BTD` 虚拟通话 SCO）。
 3. `BtAudioPolicy.java` — 协调 `QCOM-BTD` A2DP 自动连接优先级：
    - 当 `media=usb && navi=usb` 时将 `bluetooth_a2dp_sink_priority_<MAC>` 设为 `0`（保留 `bluetooth_headset_priority_<MAC>=100`），根治威飒每 6 秒 A2DP 闪断重试导致的音频卡顿与 `audioserver` 崩溃；
    - 当 `media=bt || navi=bt` 时自动恢复为 `100` 并清除 `FOR_MEDIA=10 -> 0`，并带 `<4s` 连续闪断熔断机制。
@@ -51,10 +52,10 @@
 
 ---
 
-## 4. 盒子端切换工具（`tbox-usb-switch` v1.3）
+## 4. 盒子端切换工具（`tbox-usb-switch` v1.4）
 
 - 包名：`com.tbox.usbswitch`
-- 提供大屏触控 UI：一键切换 **CarPlay / CarLife / USB ADB** 模式、查看/切换 Wi-Fi ADB、实时热切换 **媒体 / 导航 / 通话** 音频路由（USB vs BT）。
+- 提供大屏触控 UI：一键切换 **CarPlay / CarLife / USB ADB** 模式、查看/切换 Wi-Fi ADB、实时热切换 **媒体 / 导航 / 通话** 音频路由（USB vs BT），并在“电话音频”项标明推荐 USB（蓝牙模式适用于手机直连车机）。
 
 ---
 
@@ -64,13 +65,16 @@
 
 ---
 
-## 6. 当前实车验证进度（2026-11-20 Round 3 后）
+## 6. 当前实车验证进度与根因结论（2026-11-20 Round 3 → Round 4）
 
 - **已实车通过**：
   - CarLife USB AOA 投屏（1920x720@30fps）、多点触控、切回界面不自动按桌面键；
-  - 媒体 48kHz + 导航高德 UID 独立 16kHz TTS 双通道分离；
-  - 方向盘语音键唤醒盒子语音助手（思必驰天琴）；
-  - `QCOM-BTD` 断开重试与音频卡顿整治方案已部署（待结合 Round 3 日志复核）。
-- **待基于 Round 3 实车日志定位修复**：
-  - `call=usb`：可听见对方，对方听不到车机麦克风声音；
-  - `call=bt`：蓝牙通话双方无声音。
+  - 媒体 48kHz + 导航高德 UID 独立 16kHz TTS 双通道分离，音频全程无卡顿；
+  - 方向盘语音键一键唤醒/关闭盒子语音助手（思必驰天琴，555KB 实车麦 PCM、`dropped_bytes=0`、`track_recoveries=0`）；
+  - `QCOM-BTD` 零闪断。
+- **Round 3 剩余问题根因与 Round 4 修复**：
+  - **`call=usb` 对方听不到声音（已根治）**：反编译盒子 `/system/framework/framework.jar` 证实原厂 `AudioTrack.play()` 在通话期间（`sys.phonecall.state=1`）对非 `com.suding.speedplay` 进程直接静默 `return`，导致 `Api28MicBridge` 的车机麦注入 `AudioTrack` 从未真正启动，并诱发 3 次重试后注销活跃 `AudioPolicy` 触发 `audioserver` `SIGSEGV`（`tombstone_02`）。Round 4 改为反射调用 `AudioTrack.startImpl()` 并禁止活跃期注销 `AudioPolicy`，已在桌面实机模拟 `sys.phonecall.state=1` + `uid=0` 录音闭环验证通过。
+  - **`call=bt` 经 `QCOM-BTD` 双方无声（已证实硬件/固件级双限制）**：
+    1. 反编译盒子 `/vendor/lib/hw/audio.primary.msm8953.so` 证实 `start_input_stream()`（`0xe248`）被原厂硬编码为无条件 `pcm_open(1, 1, PCM_IN)`（`/dev/snd/pcmC1D1c`，CarPlay 虚拟回环），完全不走 `select_devices()` / `BT_SCO_MIC`，因此盒子侧无法经 `QCOM-BTD` HFP SCO 采集车机麦克风；
+    2. 威飒车机对 `QCOM-BTD` 发起的虚拟通话 eSCO 在建链 12–24ms 后均主动发送 `HCI_Disconnect (0x13 Remote User Terminated Connection)`。
+    - 结论：使用盒子蓝牙电话（手机连盒子）时固定使用 **`call=usb`**（下行 USB + 上行车机麦 USB + 盒子 `sdsdk816` 内置 WebRTC APM 回声消除）；若需原车蓝牙通话，直接将手机连接威飒原车蓝牙并把 `电话音频` 设为 `蓝牙`（免 CarLife 接管）。

@@ -1,7 +1,5 @@
 package org.carlife.hulab;
 
-import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothProfile;
 import android.content.Context;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
@@ -22,7 +20,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Android 9 (API 28) CarLife head-unit microphone bridge + BT HFP SCO call trigger.
+ * Android 9 (API 28) CarLife head-unit microphone bridge.
  *
  * Registers an AudioPolicy recorder-injection mix (16 kHz mono PCM16) covering
  * MIC(1), VOICE_RECOGNITION(6), VOICE_COMMUNICATION(7), UNPROCESSED(9) (excluding
@@ -32,11 +30,20 @@ import java.util.concurrent.TimeUnit;
  *  - Creates a fresh AudioTrack via createAudioTrackSource(mix) in activateMic() and
  *    releases it in deactivateMic(), eliminating stale CBLK_INVALID (0x004) / dead
  *    IAudioTrack stalls across AudioPolicy registrations and standby timeouts.
+ *  - Starts the AudioTrack via AudioTrack.startImpl() reflection to bypass the Tbox
+ *    OEM DesonAudioTrack hook in AudioTrack.play(), which silently returns without
+ *    starting whenever sys.phonecall.state=1 (BT phone call active) for any caller
+ *    other than com.suding.speedplay — and also avoids polluting SudingMediaFocusControl
+ *    rawAudioWriter with MdMain's internal virtual-mic track.
  *  - Monitors playback head position in pump(); if write()==0 persists with stalled
- *    headPos >= 400 ms, automatically recreates AudioTrack (and AudioPolicy if needed).
- *  - When call routing is BT (captureRootCalls=false), observes sdsdk816 (uid=0) and
- *    VoIP (preset 7) recordings and opens/closes QCOM-BTD HFP SCO via AudioManager so
- *    Toyota Venza wakes its native Bluetooth hands-free phone UI and hardware AEC.
+ *    headPos >= 400 ms, recreates AudioTrack only (never unregisters an AudioPolicy
+ *    while an external app holds an open AudioRecord on it, avoiding both MonoPipe
+ *    teardown and Android 9's AudioPolicyManager::stopInput() UAF SIGSEGV).
+ *  - When call=bt (captureRootCalls=false), CarLife leaves uid=0 (sdsdk816) and VoIP
+ *    (preset 7) uncaptured so native car BT calls (phone paired directly to head unit)
+ *    are unaffected. Note: Tbox QCOM-BTD HFP SCO cannot carry sdsdk816 calls because
+ *    Tbox's vendor audio.primary.msm8953.so start_input_stream() hardcodes
+ *    pcm_open(1, 1, PCM_IN) (/dev/snd/pcmC1D1c) and never routes BT_SCO_MIC.
  */
 final class Api28MicBridge implements AutoCloseable {
     interface Demand {
@@ -84,7 +91,7 @@ final class Api28MicBridge implements AutoCloseable {
     private int lastHeadPos;
     private long lastHeadAdvanceMs;
     private int trackRecoveries;
-    private int policyRecoveries;
+    private String lastStartMode = "none";
 
     private volatile boolean closed;
     private volatile boolean recordingWanted;
@@ -92,19 +99,12 @@ final class Api28MicBridge implements AutoCloseable {
     private volatile String activeRecorderPkg = "";
     private boolean policyRegistered;
     private boolean callbackRegistered;
-    private boolean btScoActive;
+    private boolean btCallLogged;
 
     private final Runnable stopDebounceTask = new Runnable() {
         public void run() {
             if (!closed && !hasActiveExternalRecorder()) {
                 deactivateMic();
-            }
-        }
-    };
-    private final Runnable btScoStopDebounceTask = new Runnable() {
-        public void run() {
-            if (!closed && !hasActiveBtCallRecorder()) {
-                deactivateBtSco();
             }
         }
     };
@@ -238,6 +238,29 @@ final class Api28MicBridge implements AutoCloseable {
         mix = null;
     }
 
+    /**
+     * Starts an AudioTrack while bypassing Tbox OEM's DesonAudioTrack hook in AudioTrack.play(),
+     * which silently returns without calling startImpl() whenever sys.phonecall.state=1 for any
+     * process other than com.suding.speedplay.
+     */
+    private String startTrackBypassOem(AudioTrack t) throws Exception {
+        try {
+            Method startImpl = AudioTrack.class.getDeclaredMethod("startImpl");
+            startImpl.setAccessible(true);
+            startImpl.invoke(t);
+            if (t.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                return "startImpl";
+            }
+        } catch (NoSuchMethodException ignored) {
+        } catch (InvocationTargetException e) {
+            Throwable c = e.getCause();
+            if (c instanceof Exception) throw (Exception) c;
+            throw new IOException("AudioTrack.startImpl failed", c);
+        }
+        t.play();
+        return "play";
+    }
+
     private int openTrack() throws Exception {
         closeTrack();
         if (!policyRegistered || policy == null || mix == null || mixType == null) {
@@ -250,7 +273,12 @@ final class Api28MicBridge implements AutoCloseable {
             }
             throw new IOException("mic AudioTrack not initialized");
         }
-        fresh.play();
+        lastStartMode = startTrackBypassOem(fresh);
+        if (fresh.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
+            try { fresh.release(); } catch (RuntimeException ignored) {}
+            throw new IOException("mic AudioTrack failed to enter PLAYSTATE_PLAYING (state="
+                    + fresh.getPlayState() + ", mode=" + lastStartMode + ")");
+        }
         track = fresh;
         stallZeroStreak = 0;
         lastHeadPos = fresh.getPlaybackHeadPosition();
@@ -325,8 +353,6 @@ final class Api28MicBridge implements AutoCloseable {
         if (c == null || captureRootCalls) return false;
         int src = c.getClientAudioSource();
         int uid = clientUid(c);
-        // When call=bt: trigger QCOM-BTD HFP SCO for sdsdk816 calls (uid=0, MIC/VOICE_COMM)
-        // and VoIP apps using VOICE_COMMUNICATION(7).
         return (uid == 0 && (src == 1 || src == 7)) || src == 7;
     }
 
@@ -337,18 +363,6 @@ final class Api28MicBridge implements AutoCloseable {
             if (list == null) return false;
             for (AudioRecordingConfiguration c : list) {
                 if (isExternalAppRecorder(c)) return true;
-            }
-        } catch (RuntimeException ignored) {}
-        return false;
-    }
-
-    private boolean hasActiveBtCallRecorder() {
-        if (manager == null || captureRootCalls) return false;
-        try {
-            List<AudioRecordingConfiguration> list = manager.getActiveRecordingConfigurations();
-            if (list == null) return false;
-            for (AudioRecordingConfiguration c : list) {
-                if (isBtCallRecorder(c)) return true;
             }
         } catch (RuntimeException ignored) {}
         return false;
@@ -397,59 +411,24 @@ final class Api28MicBridge implements AutoCloseable {
             callRecordingActive = false;
         }
 
-        // 2. BT HFP SCO call routing when call=bt
+        // 2. Diagnostic notice when call=bt sees a Tbox-local call recorder (e.g. sdsdk816).
+        // Tbox audio.primary.msm8953.so start_input_stream() hardcodes pcm_open(1,1,PCM_IN)
+        // (/dev/snd/pcmC1D1c) and never routes BT_SCO_MIC, and Venza HU drops QCOM-BTD
+        // virtual-call eSCO with HCI_ERR_PEER_USER (0x13); call=bt is for phone-direct-to-HU BT.
         if (btCall != null) {
-            worker.removeCallbacks(btScoStopDebounceTask);
-            if (!btScoActive) {
+            if (!btCallLogged) {
+                btCallLogged = true;
                 String pkg = "";
                 int uid = clientUid(btCall);
                 try {
                     pkg = String.valueOf(call(btCall, "getClientPackageName", new Class<?>[0]));
                 } catch (Throwable ignored) {}
-                activateBtSco(uid, btCall.getClientAudioSource(), pkg);
+                MdMain.logFields("api28_call_bt_passthrough", "state", "not_captured_call_bt",
+                        "uid", uid, "source", btCall.getClientAudioSource(), "package", pkg,
+                        "hint", "switch persist.tbox.carlife.audio.call=usb for Tbox BT phone calls");
             }
-        } else if (btScoActive) {
-            worker.removeCallbacks(btScoStopDebounceTask);
-            worker.postDelayed(btScoStopDebounceTask, STOP_DEBOUNCE_MS);
-        }
-    }
-
-    private void activateBtSco(int uid, int source, String pkg) {
-        if (manager == null || btScoActive) return;
-        boolean hfpConnected = false;
-        try {
-            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-            if (adapter != null && adapter.isEnabled()) {
-                hfpConnected = adapter.getProfileConnectionState(BluetoothProfile.HEADSET) == BluetoothProfile.STATE_CONNECTED;
-            }
-        } catch (Throwable ignored) {}
-        if (!hfpConnected) {
-            MdMain.logFields("api28_bt_sco", "state", "skipped_hfp_disconnected",
-                    "uid", uid, "source", source, "package", pkg);
-            return;
-        }
-        try {
-            manager.setMode(AudioManager.MODE_IN_COMMUNICATION);
-            manager.startBluetoothSco();
-            manager.setBluetoothScoOn(true);
-            btScoActive = true;
-            MdMain.logFields("api28_bt_sco", "state", "sco_start",
-                    "uid", uid, "source", source, "package", pkg, "hfp_connected", true);
-        } catch (Throwable t) {
-            MdMain.logFields("api28_bt_sco", "state", "sco_start_error", "error", describe(t));
-        }
-    }
-
-    private void deactivateBtSco() {
-        if (manager == null || !btScoActive) return;
-        btScoActive = false;
-        try {
-            manager.setBluetoothScoOn(false);
-            manager.stopBluetoothSco();
-            manager.setMode(AudioManager.MODE_NORMAL);
-            MdMain.logFields("api28_bt_sco", "state", "sco_stop");
-        } catch (Throwable t) {
-            MdMain.logFields("api28_bt_sco", "state", "sco_stop_error", "error", describe(t));
+        } else {
+            btCallLogged = false;
         }
     }
 
@@ -461,7 +440,6 @@ final class Api28MicBridge implements AutoCloseable {
         writing = null;
         writingOffset = 0;
         trackRecoveries = 0;
-        policyRecoveries = 0;
         int bufFrames;
         try {
             bufFrames = openTrack();
@@ -472,7 +450,8 @@ final class Api28MicBridge implements AutoCloseable {
         recordingWanted = true;
         activeRecorderPkg = pkg == null ? "" : pkg;
         MdMain.logFields("api28_mic_bridge", "state", "mic_start", "uid", uid, "source", source,
-                "package", pkg, "is_call", isCall, "buffer_frames", bufFrames);
+                "package", pkg, "is_call", isCall, "buffer_frames", bufFrames,
+                "start_mode", lastStartMode, "play_state", track != null ? track.getPlayState() : -1);
         try { demand.changed(true); } catch (RuntimeException ignored) {}
         worker.removeCallbacks(pumpTask);
         worker.post(pumpTask);
@@ -496,7 +475,7 @@ final class Api28MicBridge implements AutoCloseable {
                 "received_packets", receivedPackets, "written_bytes", writtenBytes,
                 "dropped_bytes", droppedBytes, "pcm_peak", pcmPeak,
                 "head_pos", finalHead, "track_recoveries", trackRecoveries,
-                "policy_recoveries", policyRecoveries);
+                "start_mode", lastStartMode);
         try { demand.changed(false); } catch (RuntimeException ignored) {}
     }
 
@@ -513,22 +492,6 @@ final class Api28MicBridge implements AutoCloseable {
         }
     }
 
-    private boolean recoverPolicy(String reason) {
-        MdMain.logFields("api28_mic_bridge", "state", "mic_policy_recover",
-                "reason", reason, "attempt", policyRecoveries + 1);
-        try {
-            closeTrack();
-            unregisterPolicyInternal();
-            registerPolicyInternal();
-            openTrack();
-            return true;
-        } catch (Throwable t) {
-            MdMain.logFields("api28_mic_bridge", "state", "mic_policy_recover_failed",
-                    "reason", reason, "error", describe(t));
-            return false;
-        }
-    }
-
     private static int safeHeadPos(AudioTrack t) {
         try { return t.getPlaybackHeadPosition(); } catch (RuntimeException ignored) { return -1; }
     }
@@ -538,13 +501,13 @@ final class Api28MicBridge implements AutoCloseable {
         long now = SystemClock.uptimeMillis();
         try {
             if (track == null || track.getState() != AudioTrack.STATE_INITIALIZED) {
-                if (trackRecoveries < 2) {
+                if (trackRecoveries < 3) {
                     trackRecoveries++;
                     recoverTrack("uninitialized");
                 }
             }
             if (track != null && track.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
-                track.play();
+                lastStartMode = startTrackBypassOem(track);
             }
             for (int i = 0; i < 6 && track != null; i++) {
                 if (writing != null && now - writing.created > MAX_AGE_MS) {
@@ -570,7 +533,7 @@ final class Api28MicBridge implements AutoCloseable {
                 int count = Math.min(1024, writing.data.length - writingOffset);
                 int n = track.write(writing.data, writingOffset, count, AudioTrack.WRITE_NON_BLOCKING);
                 if (n < 0) {
-                    if (trackRecoveries < 2) {
+                    if (trackRecoveries < 3) {
                         trackRecoveries++;
                         if (recoverTrack("write_err_" + n)) continue;
                     }
@@ -585,12 +548,12 @@ final class Api28MicBridge implements AutoCloseable {
                         lastHeadAdvanceMs = now;
                         stallZeroStreak = 0;
                     } else if (stallZeroStreak >= STALL_ZERO_THRESHOLD && now - lastHeadAdvanceMs >= STALL_DURATION_MS) {
-                        if (trackRecoveries < 2) {
+                        // Never unregister an active AudioPolicy while an external AudioRecord is open on it:
+                        // tearing down the r_submix sink mid-recording strands the recorder AND triggers
+                        // Android 9 AudioPolicyManager::stopInput() UAF SIGSEGV when the recorder stops.
+                        if (trackRecoveries < 3) {
                             trackRecoveries++;
                             recoverTrack("head_stalled_pos_" + head);
-                        } else if (policyRecoveries < 1) {
-                            policyRecoveries++;
-                            recoverPolicy("head_stalled_after_track_retry");
                         }
                     }
                     break;
@@ -643,7 +606,7 @@ final class Api28MicBridge implements AutoCloseable {
         }
         writing = null;
         writingOffset = 0;
-        deactivateBtSco();
+        btCallLogged = false;
         if (manager != null && callbackRegistered && callback != null) {
             try { manager.unregisterAudioRecordingCallback(callback); } catch (RuntimeException ignored) {}
             callbackRegistered = false;

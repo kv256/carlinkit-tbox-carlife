@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 # Pull persisted CarLife logs (/cache/carlife/logs) + live device audio/BT state into git-ignored logs/<timestamp>/.
+# Usage: scripts/pull_logs.sh [adb-serial] [--full]
+#   --full  Also pull the latest persisted Android/kernel logcat from /storage/emulated/0/x7_Log/ and tombstones.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ADB="${ADB_BIN:-$REPO/../tools/linux/platform-tools/adb}"
 DEFAULT_IPS=()
-SERIAL="${1:-}"
+SERIAL=""
+FULL=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --full) FULL=1 ;;
+    *) [ -z "$SERIAL" ] && SERIAL="$arg" ;;
+  esac
+done
 
 if [ -z "$SERIAL" ]; then
   SERIAL=$("$ADB" devices | awk 'NR>1 && $2=="device" {print $1; exit}')
@@ -41,6 +51,15 @@ done
   ps -ef | grep -E \"carlife-daemon|org\\.carlife\\.hulab|sdsdk816\" | grep -v grep
   echo ===TOMBSTONES===
   ls -la /data/tombstones/ 2>/dev/null || true
+  echo ===X7_LOG===
+  ls -lt /storage/emulated/0/x7_Log/ 2>/dev/null | head -n 15 || true
 '" > "$OUT/device_state.txt"
+
+if [ "$FULL" = "1" ]; then
+  LATEST_AND=$("$ADB" -s "$SERIAL" shell "ls -t /storage/emulated/0/x7_Log/and_*.ini 2>/dev/null | head -n 1" | tr -d '\r')
+  LATEST_KERN=$("$ADB" -s "$SERIAL" shell "ls -t /storage/emulated/0/x7_Log/kernel_*.ini 2>/dev/null | head -n 1" | tr -d '\r')
+  [ -n "$LATEST_AND" ] && "$ADB" -s "$SERIAL" pull "$LATEST_AND" "$OUT/$(basename "$LATEST_AND")"
+  [ -n "$LATEST_KERN" ] && "$ADB" -s "$SERIAL" pull "$LATEST_KERN" "$OUT/$(basename "$LATEST_KERN")"
+fi
 
 ls -lh "$OUT"
