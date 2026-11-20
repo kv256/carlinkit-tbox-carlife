@@ -1,4 +1,4 @@
-# Tbox CarLife for Toyota Venza (CPC200-Tbox / Android 9)
+# carlinkit-tbox-carlife
 
 基于上游 [`Carlife_on_box` (`v2026.10.17` / `d9397d9`)](https://github.com/SadykovIV/Carlife_on_box) 面向 **车连易 Carlinkit AI Box（CPC200-Tbox，Qualcomm `msm8953` / Android 9 / API 28）** 与 **2022 款丰田威飒（DesaySV `G6SA_r8a7796` / Android 8.1 原厂 CarLife）** 的原生 CarLife USB AOA 移植与定制项目。
 
@@ -7,7 +7,7 @@
 ## 目录结构
 
 ```text
-tbox-carlife-venza/
+carlinkit-tbox-carlife/
 ├── carlife-md-api28/        # Android 9 (API 28) CarLife USB AOA 核心服务端 (carlife-md-api28.jar)
 │   ├── build.sh             # 编译脚本 (javac 8 + d8 --min-api 28)
 │   ├── compile-stubs/       # 编译期隐藏 API stub (不打包进 DEX)
@@ -22,13 +22,13 @@ tbox-carlife-venza/
 │   ├── AndroidManifest.xml
 │   ├── build.sh
 │   └── res/values/config.xml
-├── tbox-usb-switch/         # 盒子端模式 & 音频路由切换 App (v1.3)
+├── tbox-usb-switch/         # 盒子端模式 & 音频路由切换 App (v1.4)
 │   ├── build.sh
 │   └── app/
 ├── scripts/
 │   ├── build_all.sh         # 一键编译 JAR + RRO Overlay + TboxUsbSwitch APK
 │   ├── deploy.sh            # 自动识别盒子 ADB IP，原子推送并由 init 重拉单实例守护进程
-│   └── pull_logs.sh         # 拉取 /cache/carlife/logs/ 与设备运行状态到 logs/
+│   └── pull_logs.sh         # 拉取 /cache/carlife/logs/ 与设备运行状态（--full 含 x7_Log）到 logs/
 └── docs/
     └── CUSTOMIZATIONS.md    # 详细定制清单、与上游差异及实车状态记录
 ```
@@ -52,7 +52,7 @@ bash scripts/pull_logs.sh
 ```
 
 > **查看与上游 `Carlife_on_box` 的全部代码差异**：
-> 首次提交 (`chore: import upstream Carlife_on_box v2026.10.17`) 为纯净上游基线，执行 `git diff --stat HEAD~1 -- carlife-md-api28/src/` 或 `git log -p` 即可清晰审查每一处定制修改。
+> 首次提交 (`28b5865`, `chore: import upstream Carlife_on_box v2026.10.17`) 为纯净上游基线，执行 `git diff --stat 28b5865 -- carlife-md-api28/src/` 或 `git log -p` 即可清晰审查每一处定制修改。
 
 ## 运行期属性（可热切换，无需重启）
 

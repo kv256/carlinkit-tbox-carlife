@@ -1,4 +1,4 @@
-# 定制与修改总清单（CPC200-Tbox + 2022 丰田威飒）
+# `carlinkit-tbox-carlife` 定制与修改总清单（CPC200-Tbox / Android 9）
 
 本文档记录在 `Carlife_on_box v2026.10.17 (d9397d9)` 与 CPC200-Tbox 原厂固件（2025.12.18 OTA / Android 9 / Magisk v31.1）之上实施的全部软件、系统配置与脚本定制。
 
