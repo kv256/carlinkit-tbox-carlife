@@ -67,6 +67,7 @@ if [ "$DO_MODULE" = "1" ]; then
   [ -f "$OVL" ] || bash "$REPO/bt-phone-overlay/build.sh"
   "$ADB" -s "$SERIAL" push "$REPO/magisk-module/module.prop" /data/local/tmp/tbox_module.prop
   "$ADB" -s "$SERIAL" push "$REPO/magisk-module/system.prop" /data/local/tmp/tbox_system.prop
+  "$ADB" -s "$SERIAL" push "$REPO/magisk-module/post-fs-data.sh" /data/local/tmp/tbox_post_fs_data.sh
   "$ADB" -s "$SERIAL" push "$REPO/magisk-module/system/bin/sd-reverse.sh" /data/local/tmp/tbox_sd_reverse.sh
   "$ADB" -s "$SERIAL" push "$REPO/magisk-module/service.d/wifi_adb.sh" /data/local/tmp/tbox_wifi_adb.sh
   "$ADB" -s "$SERIAL" push "$OVL" /data/local/tmp/TboxBtPhoneOverlay.apk
@@ -75,17 +76,18 @@ if [ "$DO_MODULE" = "1" ]; then
     mkdir -p /data/adb/modules/tbox_carlife/system/bin /data/adb/modules/tbox_carlife/system/vendor/overlay /data/adb/modules/tbox_carlife/system/etc/bluetooth /data/adb/service.d
     cp /data/local/tmp/tbox_module.prop /data/adb/modules/tbox_carlife/module.prop
     cp /data/local/tmp/tbox_system.prop /data/adb/modules/tbox_carlife/system.prop
+    cp /data/local/tmp/tbox_post_fs_data.sh /data/adb/modules/tbox_carlife/post-fs-data.sh
     cp /data/local/tmp/tbox_sd_reverse.sh /data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh
     cp /data/local/tmp/TboxBtPhoneOverlay.apk /data/adb/modules/tbox_carlife/system/vendor/overlay/TboxBtPhoneOverlay.apk
     cp /data/local/tmp/tbox_wifi_adb.sh /data/adb/service.d/wifi_adb.sh
     cp /data/local/tmp/tbox_interop_database.conf /data/adb/modules/tbox_carlife/system/etc/bluetooth/interop_database.conf
     chmod 0644 /data/adb/modules/tbox_carlife/module.prop /data/adb/modules/tbox_carlife/system.prop /data/adb/modules/tbox_carlife/system/vendor/overlay/TboxBtPhoneOverlay.apk /data/adb/modules/tbox_carlife/system/etc/bluetooth/interop_database.conf
-    chmod 0755 /data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh /data/adb/service.d/wifi_adb.sh
+    chmod 0755 /data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh /data/adb/modules/tbox_carlife/post-fs-data.sh /data/adb/service.d/wifi_adb.sh
     chown -R root:root /data/adb/modules/tbox_carlife
     chown root:shell /data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh
     chown root:root /data/adb/service.d/wifi_adb.sh
     chcon u:object_r:system_file:s0 /data/adb/modules/tbox_carlife/system/etc/bluetooth/interop_database.conf 2>/dev/null || true
-    rm -f /data/local/tmp/tbox_module.prop /data/local/tmp/tbox_system.prop /data/local/tmp/tbox_sd_reverse.sh /data/local/tmp/tbox_wifi_adb.sh /data/local/tmp/TboxBtPhoneOverlay.apk /data/local/tmp/tbox_interop_database.conf
+    rm -f /data/local/tmp/tbox_module.prop /data/local/tmp/tbox_system.prop /data/local/tmp/tbox_post_fs_data.sh /data/local/tmp/tbox_sd_reverse.sh /data/local/tmp/tbox_wifi_adb.sh /data/local/tmp/TboxBtPhoneOverlay.apk /data/local/tmp/tbox_interop_database.conf
   '"
   echo "NOTE: Magisk module / RRO overlay changes take effect after reboot."
 fi

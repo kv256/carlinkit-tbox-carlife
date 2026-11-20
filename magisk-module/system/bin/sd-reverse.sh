@@ -12,9 +12,11 @@ EXE_PATH=/system/bin/
 # USB ADB mode (persist.sdcarplay.reverse.disable=1) and CarPlay keep the stock flow.
 if [ "`getprop persist.sdcarplay.reverse.disable`" != "1" ] && [ "`getprop persist.tbox.carlife`" = "1" ] && [ -x /data/adb/carlife/carlife-daemon.sh ];then
 	setprop sys.usb.configfs 2
-	setprop sys.usb.config none
+	setprop sys.usb.config carlife
 	setprop persist.carplay.auto 0
-	setprop persist.vendor.usb.config none
+	# "carlife" matches no init trigger: with "none", init's "sys.usb.config=none && configfs=1"
+	# action unbinds the gadget that post-fs-data.sh publishes at ~6.5 s during the next boot.
+	setprop persist.vendor.usb.config carlife
 	setprop sys.qcom.main.start 1
 	setprop system.qcom.main.start 1
 	(

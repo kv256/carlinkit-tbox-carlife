@@ -19,7 +19,7 @@ export PATH
 # First thing, before any (slow, boot-contended) setup: disarm the stock configfs=1 triggers.
 # init.msm.usb.configfs.rc binds the debug composite <1 s after the gadget functions exist.
 setprop sys.usb.configfs 2
-setprop sys.usb.config none
+setprop sys.usb.config carlife
 
 BASE=/data/adb/carlife
 JAR=$BASE/carlife-md-api28.jar
@@ -61,7 +61,9 @@ set_phase() {
 
 MD_PID=""
 OBS_PID=""
+KMSG_PID=""
 GUARD_PID=""
+BTW_PID=""
 BALL_STARTED=0
 
 stop_pid() {
@@ -85,14 +87,17 @@ stop_pid() {
 cleanup_all() {
     log "CLEANUP_ALL"
     stop_pid "$GUARD_PID"; GUARD_PID=""
-    stop_pid "$OBS_PID"; OBS_PID=""
+    stop_observer
+    stop_pid "$BTW_PID"; BTW_PID=""
     stop_pid "$MD_PID"; MD_PID=""
 }
 trap 'cleanup_all; exit 0' TERM INT
 
 claim_usb_props() {
     setprop sys.usb.configfs 2
-    setprop sys.usb.config none
+    # not "none": "sys.usb.config=none && sys.usb.configfs=1" unbinds the gadget if init flips
+    # configfs back to 1 during boot; "carlife" matches no trigger
+    setprop sys.usb.config carlife
     setprop sys.usb.state carlife
 }
 
@@ -118,6 +123,7 @@ init_usb_hw() {
     done
     # Take exclusive control from stock init.usb.configfs.rc / init.msm.usb.configfs.rc (configfs=1 triggers)
     claim_usb_props
+    : > "$RUN/usb.daemon"   # post-fs-data.sh keeper stops touching the gadget
     log "USB_CLAIMED configfs=$(getprop sys.usb.configfs) udc_state=$(cat "$UDC_STATE" 2>/dev/null)"
 }
 
@@ -150,9 +156,19 @@ clear_gadget() {
 
 publish_mtp() {
     claim_usb_props
-    clear_gadget
     serial=$(getprop ro.serialno 2>/dev/null)
     [ -n "$serial" ] || serial="12345678"
+    # Gadget already published by post-fs-data.sh at ~6.5 s: keep it bound (a rebind would make the
+    # head unit see a disconnect right around its boot-time scan); only re-assert the strings.
+    if [ "$(cat "$G/idVendor" 2>/dev/null)" = "0x18d1" ] && [ "$(cat "$G/idProduct" 2>/dev/null)" = "0x4ee1" ] &&
+       [ "$(basename "$(readlink "$G/configs/b.1/f1" 2>/dev/null)")" = "mtp.gs0" ] && [ -n "$(cat "$G/UDC" 2>/dev/null)" ]; then
+        printf '%s' "$serial" > "$G/strings/0x409/serialnumber"
+        printf 'CarLife' > "$G/strings/0x409/manufacturer"
+        printf 'AndroidBox' > "$G/strings/0x409/product"
+        set_phase USB_DISCOVERY "vid=18d1 pid=4ee1 fn=mtp.gs0 serial=$serial kept=early_gadget"
+        return 0
+    fi
+    clear_gadget
     echo 0x18d1 > "$G/idVendor"
     echo 0x4ee1 > "$G/idProduct"
     echo 0x1001 > "$G/bcdDevice"
@@ -233,7 +249,7 @@ BUSYBOX=/data/adb/magisk/busybox
 # AOA ACCESSORY=START watcher. Native busybox uevent listens within milliseconds (the Java
 # UEventWatch needs ~1.5 s of app_process start-up at boot); Java stays as the fallback.
 start_observer() {
-    stop_pid "$OBS_PID"; OBS_PID=""
+    stop_observer
     rm -f "$RUN/aoa.marker" "$RUN/.aoa.marker.tmp"
     : > "$LOGS/uevents.log"
     : > "$LOGS/uevents.err"
@@ -252,6 +268,64 @@ start_observer() {
         OBS_PID=$!
         OBS_KIND=java
     fi
+    start_kmsg_watch
+}
+
+# AOA START from the kernel log. On this kernel ACCESSORY=START is raised by deferred work that
+# re-reads the USB state; the head unit resets the bus 10-16 ms after START, so when the work
+# runs late (busy CPU at boot) it only sees "disconnected" and the uevent is never sent. Car
+# boot log: all 10 HU boot-reconnect attempts (13.2-19.7 s) were lost this way. The setup
+# request itself is printed synchronously ("40.35 v0000 i0000 l0" / "mtp_ctrlrequest:1421"),
+# and /dev/kmsg keeps records until read, so this watcher cannot miss it.
+# A tag written to the kernel log marks where new records start (kmsg is read from the oldest).
+start_kmsg_watch() {
+    stop_pid "$KMSG_PID"; KMSG_PID=""
+    [ -x "$BUSYBOX" ] && [ -r /dev/kmsg ] || return 0
+    # busybox awk cannot read /dev/kmsg itself (EINVAL); cat reads one record per read().
+    # A FIFO (not a pipe) so both processes are known and killed on stop.
+    fifo="$RUN/kmsg.fifo"
+    rm -f "$fifo"
+    mkfifo -m 600 "$fifo" 2>/dev/null || return 0
+    # The first watcher of a boot also takes START requests logged before it started: the gadget is
+    # up from ~6.5 s (post-fs-data.sh), so the HU may send AOA before this daemon runs (~9.3 s).
+    # /dev/kmsg only holds this boot's records.
+    kmsg_from_boot=0
+    read _ku _ki < /proc/uptime
+    if [ -z "$KMSG_BOOT_DONE" ] && [ "${_ku%%.*}" -lt 60 ]; then kmsg_from_boot=1; fi
+    KMSG_BOOT_DONE=1
+    (
+        c=""; k=""
+        trap 'kill $c $k 2>/dev/null; exit 0' TERM INT
+        while :; do
+            read _ku _ki < /proc/uptime
+            tag="carlife-aoa-watch pid=$$ up=$_ku"
+            echo "$tag" > /dev/kmsg 2>/dev/null
+            "$BUSYBOX" awk -v tag="$tag" -v armed="$kmsg_from_boot" -v marker="$RUN/aoa.marker" '
+                !armed { if (index($0, tag)) armed = 1; next }
+                /40\.35 v[0-9a-f]+ i[0-9a-f]+ l[0-9]/ || index($0, "mtp_ctrlrequest:1421") {
+                    split($0, h, ";"); split(h[1], f, ",")
+                    tmp = marker ".kmsg.tmp"
+                    printf "KMSG uptime_s=%.3f AOA_START_REQUEST\n", f[3] / 1000000 > tmp
+                    close(tmp)
+                    system("mv " tmp " " marker)
+                }' < "$fifo" &
+            c=$!
+            cat /dev/kmsg > "$fifo" &
+            k=$!
+            wait "$c"
+            # awk ends when cat hits a read error (EPIPE after ring-buffer overrun): reopen, fresh tag
+            kill $k 2>/dev/null; wait "$k" 2>/dev/null
+            c=""; k=""
+            kmsg_from_boot=0
+            sleep 0.2
+        done
+    ) &
+    KMSG_PID=$!
+}
+
+stop_observer() {
+    stop_pid "$OBS_PID"; OBS_PID=""
+    stop_pid "$KMSG_PID"; KMSG_PID=""
 }
 
 wait_observer_ready() {
@@ -263,11 +337,11 @@ wait_observer_ready() {
         fi
         if [ "$OBS_KIND" = "busybox" ] && [ "$i" -ge 1 ]; then
             # netlink socket is bound before busybox enters its receive loop
-            log "OBSERVER_READY kind=busybox pid=$OBS_PID"
+            log "OBSERVER_READY kind=busybox pid=$OBS_PID kmsg_pid=${KMSG_PID:-none}"
             return 0
         fi
         if grep -q '^READY ' "$LOGS/uevents.log" 2>/dev/null; then
-            log "OBSERVER_READY kind=java pid=$OBS_PID"
+            log "OBSERVER_READY kind=java pid=$OBS_PID kmsg_pid=${KMSG_PID:-none}"
             return 0
         fi
         sleep 0.05
@@ -306,12 +380,120 @@ sync_bt_a2dp_priority_when_booted() {
     ) &
 }
 
+# ---------------------------------------------------------------------------------------------
+# Phone <-> box Bluetooth profiles. sdsdk816 is the goc Bluetooth stack (own chip on /dev/ttyHS0,
+# shown to phones as "AutoKit-TBox") and always reconnects the last phone with calls + music,
+# which takes the phone's hands-free link away from the head unit. persist.tbox.carlife.bt.phone:
+#   all   (default) calls + music, as stock
+#   media music only, so the phone's calls stay on the head unit's own Bluetooth (an iPhone has
+#         no per-device profile switch; the head unit is set to connect calls only)
+# Commands are the documented AT# set of /system/config.ini, written to sdsdk816's command pty
+# (com.carsyso.bluetooth owns its reading side, so this only writes):
+#   SE  disconnect the phone (there is no calls-only disconnect: it drops everything)
+#   DCn connect music only     SCn add calls to an existing link     CC<addr> calls + music
+#   (n = 1-based record in /data/goc/bt_conf.ini; DC1 = addr0 verified on iPhone)
+# State is read from sdsdk816's own logcat lines; nothing is done while a call is up (MG4/5/6).
+PROP_BT_PHONE=persist.tbox.carlife.bt.phone
+GOC_TTY=/dev/goc_serial
+GOC_CONF=/data/goc/bt_conf.ini
+
+goc_cmd() { printf 'AT#%s\r\n' "$1" > "$GOC_TTY" 2>/dev/null; }
+
+goc_index() {
+    grep -i -m 1 "^addr[0-9]*=$1\$" "$GOC_CONF" 2>/dev/null | sed 's/^addr\([0-9]*\)=.*/\1/' |
+        while read -r n; do echo $((n + 1)); done
+}
+
+goc_last_addr() { sed -n '/^\[LASTDEV\]/,/^\[/s/^addr=//p' "$GOC_CONF" 2>/dev/null | head -n 1; }
+
+bt_phone_mode() { [ "$(getprop "$PROP_BT_PHONE" 2>/dev/null)" = "media" ] && echo media || echo all; }
+
+start_bt_profile_watch() {
+    stop_pid "$BTW_PID"; BTW_PID=""
+    fifo="$RUN/btwatch.fifo"
+    rm -f "$fifo"
+    mkfifo -m 600 "$fifo" 2>/dev/null || return 0
+    (
+        k=""
+        trap '[ -n "$k" ] && kill $k 2>/dev/null; exit 0' TERM INT
+        read _bu _bi < /proc/uptime
+        tag="carlife-btwatch pid=$$ up=$_bu"
+        logcat -v brief -s sd:D carlife-btwatch:I > "$fifo" 2>/dev/null &
+        k=$!
+        # logcat replays its buffer first; this line marks where live events start
+        /system/bin/log -t carlife-btwatch "$tag"
+        armed=0 hfst=1 av=0 addr="" mode="" checked=-10 tries=0 tries_since=0 unmute_at=-10 unmute_log=-100
+        while IFS= read -r line; do
+            want_unmute=0
+            case "$line" in
+                *"$tag"*) armed=1 ;;
+                *"send_ind::MX0"*) a=${line#*send_ind::MX0}; addr=$(echo "$a" | cut -c1-12) ;;
+                *"hf connectted addr:["*) a=${line#*addr:[}; addr=$(echo "${a%%]*}" | tr -d ':') ;;
+                *"send_ind::MG"*) a=${line#*send_ind::MG}; hfst=${a%%[!0-9]*} ;;
+                *"send_ind::IA"*) hfst=1 ;;
+                *"avrcp connected"*|*"a2dp_set_configuration: codec sbc"*) av=1 ;;
+                *"gap connect event: 0"*) hfst=1; av=0 ;;
+                # Music-only: com.carsyso.bluetooth (XQBluetooth) mutes Bluetooth music (AT#VA) when
+                # the calls link drops and only unmutes for a phone it sees as connected (calls
+                # link), so the phone's stream arrives but sdsdk816 drops it ("A2dp mute!!!!").
+                *"a2dp_player_start(int, int, int): start succ"*|*"A2dp mute!!!!"*) want_unmute=1 ;;
+            esac
+            [ "$armed" = 1 ] || continue
+            read _bu _bi < /proc/uptime
+            now=${_bu%%.*}
+            prev=$mode
+            if [ $((now - checked)) -ge 2 ]; then
+                checked=$now
+                mode=$(bt_phone_mode)
+                [ -n "$prev" ] && [ "$prev" != "$mode" ] && log "BT_PHONE_MODE $prev -> $mode"
+            fi
+            [ -n "$addr" ] || addr=$(goc_last_addr)
+            if [ "$want_unmute" = 1 ] && [ "$mode" = "media" ] && [ "$hfst" != "3" ] && [ $((now - unmute_at)) -ge 4 ]; then
+                unmute_at=$now
+                goc_cmd VB
+                if [ $((now - unmute_log)) -ge 60 ]; then
+                    unmute_log=$now
+                    log "BT_PHONE_MUSIC_UNMUTED (music-only; Bluetooth app had muted it)"
+                fi
+            fi
+            if [ "$mode" = "media" ] && [ "$hfst" = "3" ]; then
+                # at most 3 attempts per 10 min, in case a phone insists on reconnecting calls
+                [ $((now - tries_since)) -gt 600 ] && { tries_since=$now; tries=0; }
+                idx=$(goc_index "$addr")
+                if [ "$tries" -lt 3 ] && [ -n "$idx" ]; then
+                    tries=$((tries + 1))
+                    log "BT_PHONE_MEDIA_ONLY addr=$addr idx=$idx try=$tries (dropping calls, reconnecting music)"
+                    goc_cmd SE
+                    sleep 3
+                    goc_cmd "DC$idx"
+                    hfst=1
+                elif [ "$tries" = "3" ]; then
+                    tries=4
+                    log "BT_PHONE_MEDIA_ONLY_GAVE_UP addr=$addr (phone keeps reconnecting calls)"
+                fi
+            elif [ "$prev" = "media" ] && [ "$mode" = "all" ] && [ "$hfst" = "1" ] && [ -n "$addr" ]; then
+                idx=$(goc_index "$addr")
+                if [ "$av" = "1" ] && [ -n "$idx" ]; then
+                    log "BT_PHONE_ALL addr=$addr idx=$idx (adding calls)"
+                    goc_cmd "SC$idx"
+                else
+                    log "BT_PHONE_ALL addr=$addr (reconnecting calls + music)"
+                    goc_cmd "CC$addr"
+                fi
+                tries=0
+            fi
+        done < "$fifo"
+    ) &
+    BTW_PID=$!
+}
+
 start_guard
 # Order matters for boot latency: claim USB -> native AOA watcher -> CarLife identity -> MdMain.
 start_observer
 init_usb_hw
 log "=== CARLIFE DAEMON BOOT pid=$$ ==="
 sync_bt_a2dp_priority_when_booted
+start_bt_profile_watch
 
 GEN=0
 while true; do
@@ -319,7 +501,7 @@ while true; do
     log "=== CYCLE gen=$GEN ==="
     [ -n "$OBS_PID" ] && [ -d "/proc/$OBS_PID" ] || start_observer
     if ! wait_observer_ready; then
-        stop_pid "$OBS_PID"; OBS_PID=""
+        stop_observer
         sleep 1
         continue
     fi
@@ -327,7 +509,7 @@ while true; do
     publish_mtp
     [ -n "$MD_PID" ] && [ -d "/proc/$MD_PID" ] || start_md
 
-    # Wait for the genuine kernel ACCESSORY=START uevent from the CarLife head unit.
+    # Wait for AOA START from the CarLife head unit (ACCESSORY=START uevent or kernel log).
     # The USB identity stays up throughout: MdMain restarts never touch the gadget.
     got_aoa=0
     while true; do
@@ -358,8 +540,8 @@ while true; do
         sleep 0.1
     done
 
-    stop_pid "$OBS_PID"; OBS_PID=""
     if [ "$got_aoa" != "1" ]; then
+        stop_observer
         clear_gadget
         sleep 1
         continue
@@ -379,6 +561,9 @@ while true; do
     note_md_progress
     log "AOA_SWITCH md_command_ready=$(md_flag command_ready && echo true || echo false) md_media_ready=$(md_flag media_ready && echo true || echo false) waited_ms=$waited"
     switch_to_accessory
+    # Stop the watchers only after switching: stop_pid needs >=0.25 s per process, and the HU
+    # repeats the AOA handshake every ~0.7 s if the accessory has not appeared yet.
+    stop_observer
     # Keep Bluetooth A2DP/HFP audio daemon (sdsdk816) at audio priority so app launches don't cause BT underruns.
     for sp in $(pidof sdsdk816 2>/dev/null); do
         renice -n -16 -p "$sp" 2>/dev/null || true
