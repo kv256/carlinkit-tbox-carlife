@@ -30,7 +30,8 @@ carlinkit-tbox-carlife/
 │   ├── deploy.sh            # 自动识别盒子 ADB IP，原子推送并由 init 重拉单实例守护进程
 │   └── pull_logs.sh         # 拉取 /cache/carlife/logs/ 与设备运行状态（--full 含 x7_Log）到 logs/
 └── docs/
-    └── CUSTOMIZATIONS.md    # 详细定制清单、与上游差异及实车状态记录
+    ├── CUSTOMIZATIONS.md    # 详细定制清单、与上游差异及实车状态记录
+    └── HANDOFF.md           # 项目交接单、部署状态与实车验收步骤
 ```
 
 ## 快速构建与部署
