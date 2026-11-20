@@ -44,6 +44,10 @@
 ## 2. Magisk 非破坏性系统层定制
 
 - `magisk-module/system/bin/sd-reverse.sh` — 覆写 `/system/bin/sd-reverse.sh`，在原厂 CarPlay / USB ADB 之间插入 `persist.tbox.carlife=1` 分支，`exec /data/adb/carlife/carlife-daemon.sh`（由 Android `init` 单实例托管）。
+- 开机自动启动 CarLife（Round 5）：车机 CarLife 只在自身开机时扫描一次 USB（`ConnectService.handleBootReconnect`，按上次连接设备的序列号匹配），之后插入的安卓设备不会自动启动（手机实测同样如此；CarPlay 走设备管理器 `start_carplay` 的独立流程）。原流程中盒子开机约 9.9 s 先以高通调试复合设备（`diag,serial_cdev,rmnet,dpl,adb`）出现，约 19.2 s 才断开并以 CarLife 设备出现，错过车机扫描。现：
+  - `sd-reverse.sh` 在脚本最前面判断 CarLife 模式并立即 `setprop sys.usb.configfs 2`，原厂 `iptables`/CPU 限频放到后台执行；USB ADB / CarPlay 模式流程不变；
+  - `carlife-daemon.sh` 在 init 创建 gadget 功能后立即接管（开机 120 s 内守护 `sys.usb.configfs=2`，使 `init.msm.usb.configfs.rc:685` 永不绑定调试配置），用 Magisk busybox `uevent` 原生监听 `ACCESSORY=START`（Java `UEventWatch` 作后备），随即发布 CarLife MTP（`18d1:4ee1`，`ro.serialno`），`MdMain` 并行启动且重启不再触碰 USB；收到 AOA 后最多等 4 s 让 `MdMain` 持有 `/dev/usb_accessory` 再切换（车机重试窗口 10×500 ms）；
+  - 实测（家中两次重启）：CarLife 设备在开机 10.5–10.9 s 出现，全程无高通调试配置、无断连；日志 `daemon.log` 开机阶段以 `boot up=<秒>` 记录时间线。
 - `magisk-module/carlife-daemon.sh` — 管理 GPIO38 / `7000000.dwc3` configfs（`mtp.gs0` → `accessory.gs2`）、拉起 `MdMain` 与 `UEventWatch`、同步 A2DP 优先级、将 `sdsdk816` 调至 `renice -16` 防切 App 音频欠载、拉起悬浮球 `com.sd.ball`。
 - `magisk-module/system/etc/bluetooth/interop_database.conf`（Round 5 实验）— 原厂高通蓝牙兼容性名单 + 针对威飒车机（`88:bd:78` / `VENZA`）的 `INTEROP_DISABLE_CODEC_NEGOTIATION`（强制 CVSD）与 `INTEROP_DISABLE_SNIFF_DURING_SCO`，用于排查 QCOM-BTD 作为 HFP AG 时车机 12–24 ms 断开 eSCO 的问题（iPhone 直连车机通话正常，说明差异在盒子一侧）。
 - `magisk-module/system.prop` — 设置 `bluetooth.hfp.client=0`，配合 RRO 覆写包将 `QCOM-BTD` 切换为手机侧角色。

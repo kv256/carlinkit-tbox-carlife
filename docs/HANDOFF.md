@@ -101,6 +101,12 @@
 - 测试：TboxUsbSwitch 把“电话音频”设为“蓝牙”，手机连接盒子拨打电话；观察车机是否进入通话界面、连接是否保持（即使暂时无声也属预期，盒子侧采集通路尚未实现）。测完不要开关蓝牙，之后执行 `bash scripts/pull_logs.sh`（已包含 HCI 日志与 AEC PCM）。
 - 还原：删除 `/data/adb/modules/tbox_carlife/system/etc/` 后重启；`setprop persist.bluetooth.btsnoopenable false`。
 
+### Round 5 开机自动启动 CarLife（待上车验证）
+
+- 根因与改动见 CUSTOMIZATIONS.md「开机自动启动 CarLife」。盒子现在开机约 10.5–10.9 s 以 CarLife 设备出现（原 19.2 s），且不再出现高通调试设备。
+- 验证：上次以盒子连接 CarLife 后熄火，再次启动车辆，观察 CarLife 是否自动弹出；之后 `bash scripts/pull_logs.sh`，查看 `daemon.log` 中 `boot up=` 时间线：`AOA_START_MATCHED` 出现在 ~11–15 s 且无人操作，即为赶上了车机开机扫描。若未赶上，说明车机扫描早于盒子能出现的最早时间（约 10 s）。
+- 回滚：`/data/adb/carlife/carlife-daemon.sh.round5.bak` 与 `/data/adb/carlife/sd-reverse.sh.round5.bak`（后者覆盖回 `/data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh`）后重启。
+
 ## 6. 交接注意事项与红线
 
 - **非破坏性原则**：严禁直接修改盒子 `/system`、`/vendor`、`/boot` 分区，一律通过 `/data/adb/modules/tbox_carlife` 与 `/data/adb/carlife` 部署。
