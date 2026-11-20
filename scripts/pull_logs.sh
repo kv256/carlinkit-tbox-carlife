@@ -42,7 +42,7 @@ done
 
 "$ADB" -s "$SERIAL" shell "su -c '
   echo ===PROPS===
-  echo carlife=\$(getprop persist.tbox.carlife) media=\$(getprop persist.tbox.carlife.audio.media) navi=\$(getprop persist.tbox.carlife.audio.navi) call=\$(getprop persist.tbox.carlife.audio.call)
+  echo carlife=\$(getprop persist.tbox.carlife) media=\$(getprop persist.tbox.carlife.audio.media) navi=\$(getprop persist.tbox.carlife.audio.navi) call=\$(getprop persist.tbox.carlife.audio.call) aec=\$(getprop persist.tbox.carlife.aec) aec_dump=\$(getprop persist.tbox.carlife.aec.dump) btsnoop=\$(getprop persist.bluetooth.btsnoopenable)
   echo ===BT_PRIORITIES===
   settings list global | grep -E \"bluetooth_(a2dp_sink|headset)_priority_\"
   echo ===STATUS===
@@ -54,6 +54,20 @@ done
   echo ===X7_LOG===
   ls -lt /storage/emulated/0/x7_Log/ 2>/dev/null | head -n 15 || true
 '" > "$OUT/device_state.txt"
+
+# Bluetooth HCI snoop (persist.bluetooth.btsnoopenable=true) and echo-canceller PCM dumps.
+mkdir -p "$OUT/bt" "$OUT/aec"
+for f in $("$ADB" -s "$SERIAL" shell "su -c 'ls /data/misc/bluetooth/logs/ 2>/dev/null'" | tr -d '\r'); do
+  [ -n "$f" ] || continue
+  "$ADB" -s "$SERIAL" exec-out "su -c 'cat /data/misc/bluetooth/logs/$f'" > "$OUT/bt/$f"
+done
+for d in $("$ADB" -s "$SERIAL" shell "su -c 'ls /cache/carlife/aec/ 2>/dev/null'" | tr -d '\r'); do
+  [ -n "$d" ] || continue
+  mkdir -p "$OUT/aec/$d"
+  for f in mic_raw.pcm ref_aligned.pcm aec_out.pcm; do
+    "$ADB" -s "$SERIAL" exec-out "su -c 'cat /cache/carlife/aec/$d/$f 2>/dev/null'" > "$OUT/aec/$d/$f"
+  done
+done
 
 if [ "$FULL" = "1" ]; then
   LATEST_AND=$("$ADB" -s "$SERIAL" shell "ls -t /storage/emulated/0/x7_Log/and_*.ini 2>/dev/null | head -n 1" | tr -d '\r')
