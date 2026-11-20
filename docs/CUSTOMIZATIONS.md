@@ -82,6 +82,20 @@
 
 ---
 
+## 4.5 CarPlay 风格车机桌面（`tbox-car-launcher` v1.0）
+
+- 包名：`com.tbox.carlauncher`（通过 Magisk 非破坏性挂载至 `/system/priv-app/TboxCarLauncher/TboxCarLauncher.apk`，配套 `/system/etc/permissions/privapp-permissions-tboxcarlauncher.xml` 与开机伴生桥 `/data/adb/service.d/tbox_vd_input.sh`，不删除原厂 `XQLauncher3`）。
+- **方案 B 精确 `1920 × 720` 浮岛分区**：
+  - 左侧 Dock：`112 × 702`（数字时钟、Wi-Fi/BT 状态、4 个长按可自定义快捷应用与激活指示条、返回/语音/应用抽屉切换键）；
+  - 中间严格 16:9 主显示区：**`1248 × 702`**（`20px` 圆角玻璃框）；
+  - 右上导航卡片：`512 × 345`（空闲态展示日期 + 「回家 / 去公司」一键高德导航 + 打开地图/搜目的地；高德车机版 `amapauto` 发出 `AUTONAVI_STANDARD_BROADCAST_SEND` `KEY_TYPE=10001` 后自动切换为矢量转向箭头 + 距离 + 路名 + 剩余里程/时间/ETA + 进度条）；
+  - 右下音乐卡片：`512 × 345`（封面动态取色渐变背景、歌名/歌手/来源角标、进度条与大尺寸播控；联合 `MediaSessionManager` + `MediaNotificationListener` + 媒体键兜底，即使手机仅连蓝牙音乐不连 HFP、原厂蓝牙音乐显示“已断开”时仍可正常显示曲目与切歌）。
+- **16:9 强约束与多点触控机制**：
+  - 由 `uid=0` 伴生 Binder 服务 `tbox_vd_bridge`（`VdInputBridge`）持有 `1248 × 702` `VirtualDisplay` 并通过 `InputManager.createInputForwarder(displayId)` 零延迟转发完整多点触控与返回键；
+  - 全局 `TaskStackListener` 监听 Display 0，任何外部拉起或请求全屏的 App 都会被即时 `moveStackToDisplay` 迁入 `1248 × 702` 虚拟屏，同时通过 `policy_control=immersive.full=*` 屏蔽系统侧边导航栏遮挡 Dock（切回原厂桌面时自动恢复）。
+
+---
+
 ## 5. 设备侧一次性系统调整（非文件型）
 
 - 停用不需要且会弹出“设备未激活”水印的翼卡/SOS 助手：`pm disable-user --user 0 com.ecar.assistantnew`（可随时 `pm enable` 还原）。

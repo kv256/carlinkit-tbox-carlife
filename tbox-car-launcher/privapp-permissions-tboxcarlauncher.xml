@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+    <privapp-permissions package="com.tbox.carlauncher">
+        <permission name="android.permission.ACTIVITY_EMBEDDING" />
+        <permission name="android.permission.MANAGE_ACTIVITY_STACKS" />
+        <permission name="android.permission.REAL_GET_TASKS" />
+        <permission name="android.permission.MEDIA_CONTENT_CONTROL" />
+        <permission name="android.permission.CAPTURE_VIDEO_OUTPUT" />
+        <permission name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" />
+        <permission name="android.permission.WRITE_SECURE_SETTINGS" />
+    </privapp-permissions>
+</permissions>

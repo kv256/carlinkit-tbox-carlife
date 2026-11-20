@@ -18,6 +18,7 @@ carlinkit-tbox-carlife/
 │   ├── system/etc/bluetooth/interop_database.conf # 威飒 HFP AG 兼容项（强制 CVSD / SCO 禁 sniff）
 │   ├── carlife-daemon.sh    # /data/adb/carlife/carlife-daemon.sh (单实例 AOA 监管)
 │   ├── service.d/wifi_adb.sh# /data/adb/service.d/wifi_adb.sh (开机常驻 Wi-Fi ADB 5555)
+│   ├── service.d/tbox_vd_input.sh # /data/adb/service.d/tbox_vd_input.sh (16:9 虚拟屏多点触控与强约束桥)
 │   └── system/bin/sd-reverse.sh # USB 模式分发 (CarLife / CarPlay / USB ADB)
 ├── bt-phone-overlay/        # 静态 RRO 覆写包 TboxBtPhoneOverlay.apk (切换 QCOM-BTD 为 HFP AG 手机角色)
 │   ├── AndroidManifest.xml
@@ -26,9 +27,13 @@ carlinkit-tbox-carlife/
 ├── tbox-usb-switch/         # 盒子端模式 & 音频路由切换 App (v1.4)
 │   ├── build.sh
 │   └── app/
+├── tbox-car-launcher/       # CarPlay 风格 1920x720 车机桌面 (16:9 主区强约束 + 高德导航卡 + 音乐卡)
+│   ├── build.sh
+│   ├── privapp-permissions-tboxcarlauncher.xml
+│   └── app/
 ├── scripts/
-│   ├── build_all.sh         # 一键编译 JAR + RRO Overlay + TboxUsbSwitch APK
-│   ├── deploy.sh            # 自动识别盒子 ADB IP，原子推送并由 init 重拉单实例守护进程
+│   ├── build_all.sh         # 一键编译 JAR + RRO Overlay + TboxUsbSwitch + TboxCarLauncher
+│   ├── deploy.sh            # 自动识别盒子 ADB IP，原子推送（支持 --jar / --module / --app / --launcher / --all）
 │   └── pull_logs.sh         # 拉取 /cache/carlife/logs/ 与设备运行状态（--full 含 x7_Log）到 logs/
 └── docs/
     ├── CUSTOMIZATIONS.md    # 详细定制清单、与上游差异及实车状态记录
