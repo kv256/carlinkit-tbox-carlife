@@ -1,0 +1,25 @@
+# Build artifacts
+build/
+**/build/
+*.class
+*.dex
+*.jar
+*.apk
+*.idsig
+*.odex
+*.vdex
+
+# Private signing keystores (keep out of version control)
+.keystore/
+*.jks
+*.keystore
+
+# Local diagnostic logs & captures
+logs/
+*.h264
+*.pcm
+*.wav
+*.png
+__pycache__/
+*.pyc
+.DS_Store
