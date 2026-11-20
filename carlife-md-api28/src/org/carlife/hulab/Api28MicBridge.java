@@ -87,6 +87,17 @@ final class Api28MicBridge implements AutoCloseable {
     private Chunk writing;
     private int writingOffset;
 
+    // Acoustic echo cancellation for Tbox BT phone calls carried over CarLife USB.
+    static final String PROP_AEC = "persist.tbox.carlife.aec";            // off | linear | 1 | 2 (default) | 3
+    static final String PROP_AEC_DELAY = "persist.tbox.carlife.aec.delay"; // auto (default) | fixed ms
+    static final String PROP_AEC_DUMP = "persist.tbox.carlife.aec.dump";   // 1 = dump PCM to /cache/carlife/aec
+    private static final int AEC_PARTITIONS = 24;      // 192 ms echo tail
+    private static final int AEC_INITIAL_DELAY_MS = 200;
+    private volatile EchoCanceller aec;
+    private boolean aecDisabledThisSession;
+    private long aecDropSeen;
+    private String aecMode = "off";
+
     private int stallZeroStreak;
     private int lastHeadPos;
     private long lastHeadAdvanceMs;
@@ -143,6 +154,12 @@ final class Api28MicBridge implements AutoCloseable {
         worker.post(new Runnable() {
             public void run() { initialize(); }
         });
+    }
+
+    /** Called on the USB writer thread after a MEDIA-lane DATA packet (48 kHz stereo) reached the head unit. */
+    void onFarEnd(byte[] pcm48kStereo, long writeUptimeMs) {
+        EchoCanceller a = aec;
+        if (a != null) a.pushRef48kStereo(pcm48kStereo, writeUptimeMs);
     }
 
     /** Called on USB reader thread when HU sends 0x58001 (16 kHz mono PCM16). */
@@ -471,6 +488,7 @@ final class Api28MicBridge implements AutoCloseable {
         writingOffset = 0;
         int finalHead = track != null ? safeHeadPos(track) : 0;
         closeTrack();
+        closeAec("mic_stop");
         MdMain.logFields("api28_mic_bridge", "state", "mic_stop",
                 "received_packets", receivedPackets, "written_bytes", writtenBytes,
                 "dropped_bytes", droppedBytes, "pcm_peak", pcmPeak,
@@ -496,10 +514,79 @@ final class Api28MicBridge implements AutoCloseable {
         try { return t.getPlaybackHeadPosition(); } catch (RuntimeException ignored) { return -1; }
     }
 
+    private void openAecIfCall() {
+        if (aec != null || aecDisabledThisSession || !callRecordingActive) return;
+        String mode = String.valueOf(AudioUsage.prop(PROP_AEC, "2")).trim().toLowerCase();
+        int level;
+        if (mode.equals("off") || mode.equals("0") || mode.equals("false")) {
+            aecDisabledThisSession = true;
+            aecMode = "off";
+            MdMain.logFields("api28_aec", "state", "disabled", "property", PROP_AEC, "value", mode);
+            return;
+        } else if (mode.equals("linear")) level = 0;
+        else if (mode.equals("1")) level = 1;
+        else if (mode.equals("3")) level = 3;
+        else level = 2;
+        int delayMs = -1;
+        String d = String.valueOf(AudioUsage.prop(PROP_AEC_DELAY, "auto")).trim();
+        try { if (!d.isEmpty() && !d.equalsIgnoreCase("auto")) delayMs = Math.max(0, Math.min(790, Integer.parseInt(d))); }
+        catch (NumberFormatException ignored) {}
+        java.io.File dump = null;
+        if ("1".equals(String.valueOf(AudioUsage.prop(PROP_AEC_DUMP, "0")).trim())) {
+            java.io.File root = new java.io.File("/cache/carlife/aec");
+            pruneDumps(root, 2);
+            dump = new java.io.File(root, String.valueOf(System.currentTimeMillis()));
+        }
+        try {
+            aec = new EchoCanceller(AEC_PARTITIONS, delayMs, level, AEC_INITIAL_DELAY_MS, dump);
+            synchronized (queue) { aecDropSeen = droppedBytes; }
+            aecMode = mode;
+            MdMain.logFields("api28_aec", "state", "start", "mode", mode, "nlp_level", level,
+                    "manual_delay_ms", delayMs, "tail_ms", AEC_PARTITIONS * EchoCanceller.N / EchoCanceller.SAMPLES_PER_MS,
+                    "dump", dump == null ? null : dump.getPath());
+        } catch (Throwable t) {
+            aecDisabledThisSession = true;
+            MdMain.logFields("api28_aec", "state", "init_failed", "error", describe(t));
+        }
+    }
+
+    /** Keeps only the newest {@code keep} dump directories so /cache (232 MB) never fills up. */
+    private static void pruneDumps(java.io.File root, int keep) {
+        java.io.File[] dirs = root.listFiles();
+        if (dirs == null || dirs.length <= keep) return;
+        Arrays.sort(dirs, new java.util.Comparator<java.io.File>() {
+            public int compare(java.io.File a, java.io.File b) { return a.getName().compareTo(b.getName()); }
+        });
+        for (int i = 0; i < dirs.length - keep; i++) {
+            java.io.File[] files = dirs[i].listFiles();
+            if (files != null) for (java.io.File f : files) f.delete();
+            dirs[i].delete();
+        }
+    }
+
+    private void closeAec(String reason) {
+        EchoCanceller a = aec;
+        aec = null;
+        aecDisabledThisSession = false;
+        if (a == null) return;
+        try {
+            MdMain.logFields("api28_aec", withState("stop", reason, a.statsAndReset()));
+        } catch (Throwable ignored) {}
+        a.close();
+    }
+
+    private static Object[] withState(String state, String reason, Object[] stats) {
+        Object[] out = new Object[stats.length + 4];
+        out[0] = "state"; out[1] = state; out[2] = "reason"; out[3] = reason;
+        System.arraycopy(stats, 0, out, 4, stats.length);
+        return out;
+    }
+
     private void pump() {
         if (closed || !recordingWanted) return;
         long now = SystemClock.uptimeMillis();
         try {
+            openAecIfCall();
             if (track == null || track.getState() != AudioTrack.STATE_INITIALIZED) {
                 if (trackRecoveries < 3) {
                     trackRecoveries++;
@@ -529,6 +616,29 @@ final class Api28MicBridge implements AutoCloseable {
                         }
                     }
                     if (writing == null) break;
+                    EchoCanceller a = aec;
+                    if (a != null) {
+                        long drops;
+                        synchronized (queue) { drops = droppedBytes; }
+                        if (drops != aecDropSeen) {
+                            aecDropSeen = drops;
+                            a.markGap();
+                        }
+                        byte[] cleaned;
+                        try {
+                            cleaned = a.process(writing.data, writing.created);
+                        } catch (Throwable err) {
+                            MdMain.logFields("api28_aec", "state", "process_error", "error", describe(err));
+                            closeAec("process_error");
+                            aecDisabledThisSession = true;
+                            cleaned = writing.data;
+                        }
+                        if (cleaned.length == 0) {
+                            writing = null;
+                            continue;
+                        }
+                        writing = new Chunk(writing.created, cleaned);
+                    }
                 }
                 int count = Math.min(1024, writing.data.length - writingOffset);
                 int n = track.write(writing.data, writingOffset, count, AudioTrack.WRITE_NON_BLOCKING);
@@ -587,6 +697,8 @@ final class Api28MicBridge implements AutoCloseable {
                         "pcm_rms", pcmSamples == 0 ? 0 : (int) Math.sqrt(pcmEnergy / pcmSamples),
                         "head_pos", track != null ? safeHeadPos(track) : -1,
                         "play_state", track != null ? track.getPlayState() : -1);
+                EchoCanceller a = aec;
+                if (a != null) MdMain.logFields("api28_aec", withState("active", aecMode, a.statsAndReset()));
             }
         } catch (Throwable t) {
             MdMain.logFields("api28_mic_bridge", "state", "pump_error", "error", describe(t));
@@ -607,6 +719,7 @@ final class Api28MicBridge implements AutoCloseable {
         writing = null;
         writingOffset = 0;
         btCallLogged = false;
+        closeAec("cleanup");
         if (manager != null && callbackRegistered && callback != null) {
             try { manager.unregisterAudioRecordingCallback(callback); } catch (RuntimeException ignored) {}
             callbackRegistered = false;

@@ -756,7 +756,11 @@ public final class MdMain {
             writingPacket=p;writingSince=SystemClock.uptimeMillis();VideoRateControl rateAtWrite=videoRate;long writeStartedNs=System.nanoTime();transport.writePacket(p.data);
             rateAtWrite.onWrite(video?Math.max(0,p.data.length-20):0,Math.max(0,System.nanoTime()-writeStartedNs),SystemClock.uptimeMillis());
             long ended=SystemClock.uptimeMillis();lastSocketWriteDurationMs=ended-writingSince;lastSocketWriteUptime=ended;socketWrittenPackets++;socketWrittenBytes+=p.data.length;if(video)socketWrittenVideoPackets++;writingSince=0;writingPacket=null;
-            if(sound!=null)audioWritten(sound);
+            if(sound!=null){
+                // Far-end reference for the mic echo canceller: MEDIA PCM exactly as it reached the head unit.
+                if(sound.channel==CarLifeAudio.MEDIA&&sound.id==CarLifeAudio.DATA){Api28MicBridge mb=micBridge;if(mb!=null)mb.onFarEnd(sound.payload,ended);}
+                audioWritten(sound);
+            }
             if(navi!=null&&navi.epoch==audio.queue.epoch())naviWireActive=navi.active;
             adaptVideo(ended);
         }}catch(Exception e){if(open)logFields("write_error","session_id",sessionId,"logical_session",nativeLogicalSession,"ever_negotiated",everNegotiated,"error",e.toString());close("write_error");}}

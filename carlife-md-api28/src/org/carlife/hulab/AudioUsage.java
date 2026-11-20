@@ -131,6 +131,10 @@ final class AudioUsage {
         return !"bt".equalsIgnoreCase(val == null ? "" : val.trim());
     }
 
+    static String prop(String key, String def) {
+        return getSystemProperty(key, def);
+    }
+
     private static String getSystemProperty(String key, String def) {
         try {
             if (!sysPropResolved) {
