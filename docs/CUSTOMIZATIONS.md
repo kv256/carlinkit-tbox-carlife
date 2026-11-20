@@ -19,6 +19,12 @@
    - 当 `media=bt || navi=bt` 时自动恢复为 `100` 并清除 `FOR_MEDIA=10 -> 0`，并带 `<4s` 连续闪断熔断机制。
 4. `UEventWatch.java` — 内核 `ACCESSORY=START` uevent 监听器（基于编译期 stub `android.os.UEventObserver`），供 `carlife-daemon.sh` 在 `mtp.gs0` 阶段精准切换至 `accessory.gs2`。
 
+5. `EchoCanceller.java`（Round 5）— `call=usb` 通话的车机麦克风回声消除（纯 Java，16 kHz）：
+   - 参考信号取自 `MdMain` 写入 USB 后的 MEDIA 通道 PCM（48 kHz 立体声 → 16 kHz 单声道），按 USB 写入时间 / 麦克风到达时间对齐到同一时间轴；
+   - 二值谱匹配自动估计回声延迟（0–800 ms，跨通话记忆）+ 24×8 ms 分块频域 NLMS（前景/背景双滤波器抗双讲）+ AEC2 式相干性残余回声抑制（WOLA）；
+   - 仿真（真实语音 + 车内脉冲响应 + 260 ms 延迟）：远端单讲抑制 32.6 dB，近端单讲无损，盒子实测每 8 ms 块约 0.7 ms CPU；
+   - 原因：盒子 `sdsdk816` 内置的是 WebRTC 移动版 AECM（`EchoControlMobile`），延迟提示按本地扬声器设计，无法覆盖 USB → 车机 → 扬声器 → 车机麦 → USB 的长链路（CarPlay 模式同样有回音也是同一原因，CarPlay 链路不经过本项目代码）。
+
 ### 修改的上游文件（10 个）
 1. `AndroidAccessoryIo.java` — 适配 `msm8953` Android 9 `/dev/usb_accessory` 读写行为。
 2. `AndroidRuntimeContext.java` — 适配 API 28 `ActivityThread.systemMain()` 上下文获取。
