@@ -15,6 +15,7 @@ carlinkit-tbox-carlife/
 ├── magisk-module/           # 非破坏性 Magisk 挂载与守护脚本
 │   ├── module.prop          # /data/adb/modules/tbox_carlife/module.prop
 │   ├── system.prop          # bluetooth.hfp.client=0
+│   ├── system/etc/bluetooth/interop_database.conf # 威飒 HFP AG 兼容项（强制 CVSD / SCO 禁 sniff）
 │   ├── carlife-daemon.sh    # /data/adb/carlife/carlife-daemon.sh (单实例 AOA 监管)
 │   ├── service.d/wifi_adb.sh# /data/adb/service.d/wifi_adb.sh (开机常驻 Wi-Fi ADB 5555)
 │   └── system/bin/sd-reverse.sh # USB 模式分发 (CarLife / CarPlay / USB ADB)

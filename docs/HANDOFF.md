@@ -94,6 +94,13 @@
 3. 拉日志：`bash scripts/pull_logs.sh`，并拉取 PCM：`adb pull /cache/carlife/aec/`。日志中 `api28_aec` 事件包含 `estimated_delay_ms`、`erle_db`、`cpu_us_per_block` 等指标。
 4. 回滚：`su -c 'cp /data/adb/carlife/carlife-md-api28.jar.round4.bak /data/adb/carlife/carlife-md-api28.jar'` 后重拉守护进程，或直接 `setprop persist.tbox.carlife.aec off`。
 
+### Round 5 QCOM-BTD 蓝牙通话排查（实验）
+
+- 已证实车机可同时处理 CarLife 与蓝牙电话（iPhone 蓝牙电话 + S20 FE CarLife 正常），因此 eSCO 被断开的原因在盒子侧（QCOM-BTD 作为 HFP AG 的行为与 iPhone 不同），并非车机能力限制。
+- 已部署：Magisk 覆盖 `interop_database.conf`（对威飒强制 CVSD、SCO 期间禁用 sniff），并开启 `persist.bluetooth.btsnoopenable=true`（HCI 日志在 `/data/misc/bluetooth/logs/`，蓝牙重启会轮换为 `.last`）。
+- 测试：TboxUsbSwitch 把“电话音频”设为“蓝牙”，手机连接盒子拨打电话；观察车机是否进入通话界面、连接是否保持（即使暂时无声也属预期，盒子侧采集通路尚未实现）。测完不要开关蓝牙，之后执行 `bash scripts/pull_logs.sh`（已包含 HCI 日志与 AEC PCM）。
+- 还原：删除 `/data/adb/modules/tbox_carlife/system/etc/` 后重启；`setprop persist.bluetooth.btsnoopenable false`。
+
 ## 6. 交接注意事项与红线
 
 - **非破坏性原则**：严禁直接修改盒子 `/system`、`/vendor`、`/boot` 分区，一律通过 `/data/adb/modules/tbox_carlife` 与 `/data/adb/carlife` 部署。

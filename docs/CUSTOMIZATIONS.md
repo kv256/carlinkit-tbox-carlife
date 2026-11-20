@@ -45,6 +45,7 @@
 
 - `magisk-module/system/bin/sd-reverse.sh` — 覆写 `/system/bin/sd-reverse.sh`，在原厂 CarPlay / USB ADB 之间插入 `persist.tbox.carlife=1` 分支，`exec /data/adb/carlife/carlife-daemon.sh`（由 Android `init` 单实例托管）。
 - `magisk-module/carlife-daemon.sh` — 管理 GPIO38 / `7000000.dwc3` configfs（`mtp.gs0` → `accessory.gs2`）、拉起 `MdMain` 与 `UEventWatch`、同步 A2DP 优先级、将 `sdsdk816` 调至 `renice -16` 防切 App 音频欠载、拉起悬浮球 `com.sd.ball`。
+- `magisk-module/system/etc/bluetooth/interop_database.conf`（Round 5 实验）— 原厂高通蓝牙兼容性名单 + 针对威飒车机（`88:bd:78` / `VENZA`）的 `INTEROP_DISABLE_CODEC_NEGOTIATION`（强制 CVSD）与 `INTEROP_DISABLE_SNIFF_DURING_SCO`，用于排查 QCOM-BTD 作为 HFP AG 时车机 12–24 ms 断开 eSCO 的问题（iPhone 直连车机通话正常，说明差异在盒子一侧）。
 - `magisk-module/system.prop` — 设置 `bluetooth.hfp.client=0`，配合 RRO 覆写包将 `QCOM-BTD` 切换为手机侧角色。
 - `magisk-module/service.d/wifi_adb.sh` — 开机自动在 TCP `5555` 启用 Wi-Fi ADB，与 CarLife / CarPlay 共存。
 
