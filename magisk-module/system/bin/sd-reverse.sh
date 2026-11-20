@@ -5,6 +5,30 @@ CHANNEL=sd_msm808
 EXE_PATH=/system/bin/
 #############################################
 
+# Native Baidu CarLife USB AOA mode (enabled via persist.tbox.carlife=1), checked first:
+# the head unit only auto-starts CarLife from a one-shot scan at its boot, so the daemon
+# must claim USB within ~1 s of init creating the gadget. The stock prelude below
+# (iptables, CPU limits) takes >1 s at boot and is run in the background for this mode.
+# USB ADB mode (persist.sdcarplay.reverse.disable=1) and CarPlay keep the stock flow.
+if [ "`getprop persist.sdcarplay.reverse.disable`" != "1" ] && [ "`getprop persist.tbox.carlife`" = "1" ] && [ -x /data/adb/carlife/carlife-daemon.sh ];then
+	setprop sys.usb.configfs 2
+	setprop sys.usb.config none
+	setprop persist.carplay.auto 0
+	setprop persist.vendor.usb.config none
+	setprop sys.qcom.main.start 1
+	setprop system.qcom.main.start 1
+	(
+		iptables -A INPUT -p tcp --dport 5060 -j DROP
+		iptables -A INPUT -p udp --dport 5060 -j DROP
+		touch /cache/cp_aa
+		for c in 0 1 2 3 4 5 6 7; do
+			echo 652800 > /sys/devices/system/cpu/cpu$c/cpufreq/scaling_min_freq
+			echo 1612800 > /sys/devices/system/cpu/cpu$c/cpufreq/scaling_max_freq
+		done
+	) &
+	exec /data/adb/carlife/carlife-daemon.sh
+fi
+
 iptables -A INPUT -p tcp --dport 5060 -j DROP
 iptables -A INPUT -p udp --dport 5060 -j DROP
 touch /cache/cp_aa
@@ -42,15 +66,7 @@ function msm808_set_cpu_parameters() {
 }
 msm808_set_cpu_parameters
 
-# Native Baidu CarLife USB AOA mode (enabled via persist.tbox.carlife=1)
-carlife_enable=`getprop persist.tbox.carlife`
-if [ "$carlife_enable" = "1" ] && [ -x /data/adb/carlife/carlife-daemon.sh ];then
-	setprop persist.carplay.auto 0
-	setprop persist.vendor.usb.config none
-	setprop sys.qcom.main.start 1
-	setprop system.qcom.main.start 1
-	exec /data/adb/carlife/carlife-daemon.sh
-fi
+# (CarLife mode is dispatched at the top of this script.)
 
 if [ "$product_mode" = "2000" ];then
 	setprop persist.carplay.auto 2
