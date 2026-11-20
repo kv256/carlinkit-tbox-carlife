@@ -8,8 +8,8 @@ final class CarLifeAudio {
     static final int MEDIA=3, INIT=0x30001, STOP=0x30002, PAUSE=0x30003,
         RESUME=0x30004, SEEK=0x30005, DATA=0x30006;
     static final int RATE=48000, CHANNELS=2, BITS=16, FRAME_BYTES=4;
-    static final int CHUNK_FRAMES=960, CHUNK_BYTES=3840, MAX_QUEUED_DATA=10;
-    static final long MAX_AGE_MS=200;
+    static final int CHUNK_FRAMES=960, CHUNK_BYTES=3840, MAX_QUEUED_DATA=16;
+    static final long MAX_AGE_MS=350;
     enum Lane {
         MEDIA(3,0x30001,0x30002,0x30006,48000,2),
         TTS(4,0x40001,0x40002,0x40003,16000,1),

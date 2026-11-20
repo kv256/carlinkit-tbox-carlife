@@ -1,0 +1,6 @@
+id=tbox_carlife
+name=Tbox CarLife AOA Mode (Android 9)
+version=v1.0
+versionCode=100
+author=local-port
+description=Adds native Baidu CarLife USB AOA projection (1920x720@30 H.264, touch, 48kHz MEDIA, 16kHz TTS, 16kHz HU Mic) alongside stock CarPlay and USB ADB modes.

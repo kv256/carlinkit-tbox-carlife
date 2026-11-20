@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Atomic non-destructive deploy to CPC200-Tbox over Wi-Fi ADB.
+# Usage:
+#   bash scripts/deploy.sh [--serial HOST:PORT] [--all | --jar | --module | --app]
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+ADB="${ADB_BIN:-$REPO/../tools/linux/platform-tools/adb}"
+DEFAULT_IPS=()
+
+SERIAL=""
+DO_JAR=1
+DO_DAEMON=1
+DO_MODULE=0
+DO_APP=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --serial|-s) SERIAL="$2"; shift 2 ;;
+    --all) DO_JAR=1; DO_DAEMON=1; DO_MODULE=1; DO_APP=1; shift ;;
+    --jar) DO_JAR=1; DO_DAEMON=0; DO_MODULE=0; DO_APP=0; shift ;;
+    --module) DO_MODULE=1; shift ;;
+    --app) DO_APP=1; shift ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+pick_device() {
+  if [ -n "$SERIAL" ]; then
+    "$ADB" connect "$SERIAL" >/dev/null 2>&1 || true
+    echo "$SERIAL"
+    return
+  fi
+  local cur
+  cur=$("$ADB" devices | awk 'NR>1 && $2=="device" {print $1; exit}')
+  if [ -n "$cur" ]; then
+    echo "$cur"
+    return
+  fi
+  for ip in ${DEFAULT_IPS[@]+"${DEFAULT_IPS[@]}"}; do
+    if "$ADB" connect "$ip" 2>/dev/null | grep -q "connected to"; then
+      echo "$ip"
+      return
+    fi
+  done
+  echo "ERROR: No Tbox ADB device reachable." >&2
+  exit 1
+}
+
+SERIAL="$(pick_device)"
+echo "Target Tbox: $SERIAL"
+
+if [ "$DO_JAR" = "1" ]; then
+  JAR="$REPO/carlife-md-api28/build/carlife-md-api28.jar"
+  [ -f "$JAR" ] || bash "$REPO/carlife-md-api28/build.sh"
+  "$ADB" -s "$SERIAL" push "$JAR" /data/local/tmp/carlife-md-api28.jar.new
+  "$ADB" -s "$SERIAL" shell "su -c 'set -e; mkdir -p /data/adb/carlife; cp /data/local/tmp/carlife-md-api28.jar.new /data/adb/carlife/carlife-md-api28.jar.tmp; chmod 0644 /data/adb/carlife/carlife-md-api28.jar.tmp; chown root:root /data/adb/carlife/carlife-md-api28.jar.tmp; mv /data/adb/carlife/carlife-md-api28.jar.tmp /data/adb/carlife/carlife-md-api28.jar; rm -rf /data/adb/carlife/oat /data/local/tmp/carlife-md-api28.jar.new; sha256sum /data/adb/carlife/carlife-md-api28.jar'"
+fi
+
+if [ "$DO_DAEMON" = "1" ]; then
+  "$ADB" -s "$SERIAL" push "$REPO/magisk-module/carlife-daemon.sh" /data/local/tmp/carlife-daemon.sh.new
+  "$ADB" -s "$SERIAL" shell "su -c 'set -e; cp /data/local/tmp/carlife-daemon.sh.new /data/adb/carlife/carlife-daemon.sh.tmp; chmod 0755 /data/adb/carlife/carlife-daemon.sh.tmp; chown root:root /data/adb/carlife/carlife-daemon.sh.tmp; mv /data/adb/carlife/carlife-daemon.sh.tmp /data/adb/carlife/carlife-daemon.sh; rm -f /data/local/tmp/carlife-daemon.sh.new; sha256sum /data/adb/carlife/carlife-daemon.sh'"
+fi
+
+if [ "$DO_MODULE" = "1" ]; then
+  OVL="$REPO/bt-phone-overlay/build/TboxBtPhoneOverlay.apk"
+  [ -f "$OVL" ] || bash "$REPO/bt-phone-overlay/build.sh"
+  "$ADB" -s "$SERIAL" push "$REPO/magisk-module/module.prop" /data/local/tmp/tbox_module.prop
+  "$ADB" -s "$SERIAL" push "$REPO/magisk-module/system.prop" /data/local/tmp/tbox_system.prop
+  "$ADB" -s "$SERIAL" push "$REPO/magisk-module/system/bin/sd-reverse.sh" /data/local/tmp/tbox_sd_reverse.sh
+  "$ADB" -s "$SERIAL" push "$REPO/magisk-module/service.d/wifi_adb.sh" /data/local/tmp/tbox_wifi_adb.sh
+  "$ADB" -s "$SERIAL" push "$OVL" /data/local/tmp/TboxBtPhoneOverlay.apk
+  "$ADB" -s "$SERIAL" shell "su -c 'set -e
+    mkdir -p /data/adb/modules/tbox_carlife/system/bin /data/adb/modules/tbox_carlife/system/vendor/overlay /data/adb/service.d
+    cp /data/local/tmp/tbox_module.prop /data/adb/modules/tbox_carlife/module.prop
+    cp /data/local/tmp/tbox_system.prop /data/adb/modules/tbox_carlife/system.prop
+    cp /data/local/tmp/tbox_sd_reverse.sh /data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh
+    cp /data/local/tmp/TboxBtPhoneOverlay.apk /data/adb/modules/tbox_carlife/system/vendor/overlay/TboxBtPhoneOverlay.apk
+    cp /data/local/tmp/tbox_wifi_adb.sh /data/adb/service.d/wifi_adb.sh
+    chmod 0644 /data/adb/modules/tbox_carlife/module.prop /data/adb/modules/tbox_carlife/system.prop /data/adb/modules/tbox_carlife/system/vendor/overlay/TboxBtPhoneOverlay.apk
+    chmod 0755 /data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh /data/adb/service.d/wifi_adb.sh
+    chown -R root:root /data/adb/modules/tbox_carlife
+    chown root:shell /data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh
+    chown root:root /data/adb/service.d/wifi_adb.sh
+    rm -f /data/local/tmp/tbox_module.prop /data/local/tmp/tbox_system.prop /data/local/tmp/tbox_sd_reverse.sh /data/local/tmp/tbox_wifi_adb.sh /data/local/tmp/TboxBtPhoneOverlay.apk
+  '"
+  echo "NOTE: Magisk module / RRO overlay changes take effect after reboot."
+fi
+
+if [ "$DO_APP" = "1" ]; then
+  APK="$REPO/tbox-usb-switch/build/TboxUsbSwitch.apk"
+  [ -f "$APK" ] || bash "$REPO/tbox-usb-switch/build.sh"
+  "$ADB" -s "$SERIAL" install -r "$APK"
+fi
+
+# Cleanly terminate current init-managed carlife-daemon + children so init respawns ONE fresh instance
+if [ "$DO_JAR" = "1" ] || [ "$DO_DAEMON" = "1" ]; then
+  echo "Respawning init-managed carlife-daemon..."
+  PIDS=$("$ADB" -s "$SERIAL" shell "su -c 'ps -ef'" | awk '(/carlife-daemon\.sh/ || /org\.carlife\.hulab\./) && !/su -c/ && !/awk/ {print $2}' | tr '\n' ' ')
+  if [ -n "${PIDS// /}" ]; then
+    "$ADB" -s "$SERIAL" shell "su -c 'kill -TERM $PIDS 2>/dev/null || true'"
+  fi
+  sleep 4
+  "$ADB" -s "$SERIAL" shell "su -c 'ps -ef | grep -E \"carlife-daemon|org\\.carlife\\.hulab\" | grep -v grep; echo ---; cat /cache/carlife/status'"
+fi

@@ -22,7 +22,7 @@ final class MediaCodecDisplaySource implements Runnable {
     static final int COLOR_SURFACE=0x7f000789;
     static final int PROFILE=MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline;
     static final int LEVEL=MediaCodecInfo.CodecProfileLevel.AVCLevel31;
-    static final int BITRATE=4000000, FPS=30, I_INTERVAL=2;
+    static final int BITRATE=3000000, FPS=30, I_INTERVAL=4;
     static final long REPEAT_US=33333;
     static final String DISPLAY_API="android.hardware.display.DisplayManager.createVirtualDisplay(String,int,int,int,android.view.Surface)";
     static final int DIAGNOSTIC_FIRST_AUS=3;
@@ -46,7 +46,7 @@ final class MediaCodecDisplaySource implements Runnable {
     volatile Thread thread;
     MediaCodec codec;
     Surface inputSurface;
-    Object virtualDisplay;
+    Api28DisplayMirror virtualDisplay;
     volatile EglDisplayPipe eglPipe;
     volatile EglDisplayPipe progressPipe;
     boolean codecStarted,eosObserved;
@@ -71,7 +71,7 @@ final class MediaCodecDisplaySource implements Runnable {
             f.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL,I_INTERVAL);
             f.setInteger("profile",PROFILE);f.setInteger("level",mode.codecLevel);
             if(MdMain.videoPath.equals("direct"))f.setLong(repeatKey,REPEAT_US);
-            f.setFloat(maxFpsKey,(float)fps);
+            if(maxFpsKey!=null)f.setFloat(maxFpsKey,(float)fps);
             return f;
         }
     }
@@ -84,8 +84,11 @@ final class MediaCodecDisplaySource implements Runnable {
         try {
             String repeat=(String)MediaFormat.class.getField("KEY_REPEAT_PREVIOUS_FRAME_AFTER").get(null);
             if(!"repeat-previous-frame-after".equals(repeat))throw new IOException("unexpected framework repeat-frame key");
-            String maxFps=(String)MediaFormat.class.getField("KEY_MAX_FPS_TO_ENCODER").get(null);
-            if(!"max-fps-to-encoder".equals(maxFps))throw new IOException("unexpected framework max-FPS key");
+            String maxFps=null;
+            try{
+                maxFps=(String)MediaFormat.class.getField("KEY_MAX_FPS_TO_ENCODER").get(null);
+                if(!"max-fps-to-encoder".equals(maxFps))throw new IOException("unexpected framework max-FPS key");
+            }catch(NoSuchFieldException api28){maxFps=null;}
             List<MediaCodecInfo> candidates=new ArrayList<MediaCodecInfo>();
             int allCodecs=MediaCodecList.class.getField("ALL_CODECS").getInt(null);
             Object list=MediaCodecList.class.getConstructor(int.class).newInstance(allCodecs);
@@ -106,7 +109,9 @@ final class MediaCodecDisplaySource implements Runnable {
                 Object video=caps.getClass().getMethod("getVideoCapabilities").invoke(caps);
                 boolean sizeRate=(Boolean)video.getClass().getMethod("areSizeAndRateSupported",int.class,int.class,double.class).invoke(video,width,height,(double)fps);
                 boolean supported=(Boolean)caps.getClass().getMethod("isFormatSupported",MediaFormat.class).invoke(caps,selection.format());
-                Object hw=info.getClass().getMethod("isHardwareAccelerated").invoke(info);
+                Object hw;
+                try{hw=info.getClass().getMethod("isHardwareAccelerated").invoke(info);}
+                catch(NoSuchMethodException api28){hw=!info.getName().startsWith("OMX.google.")&&!info.getName().startsWith("c2.android.");}
                 MdMain.logFields("codec_candidate","name",info.getName(),"hardware_accelerated",hw,"profile_levels",profiles.toString(),"color_formats",Arrays.toString(caps.colorFormats),"surface",surface,"baseline_requested_level_supported",profile,"requested_level_idc",mode.levelIdc,"size_rate_supported",sizeRate,"format_supported",supported,"bitrate_range",video.getClass().getMethod("getBitrateRange").invoke(video).toString());
                 if(surface&&profile&&sizeRate&&supported){
                     int wa=(Integer)video.getClass().getMethod("getWidthAlignment").invoke(video),ha=(Integer)video.getClass().getMethod("getHeightAlignment").invoke(video);if(width%wa!=0||height%ha!=0)throw new IOException("requested size violates actual codec alignment");
@@ -153,7 +158,7 @@ final class MediaCodecDisplaySource implements Runnable {
             stage="start_codec";api="MediaCodec.start()";codec.start();codecStarted=true;
             stage="mirror_display";api=DISPLAY_API;
             if(MdMain.videoPath.equals("egl")){eglPipe=new EglDisplayPipe(inputSurface,selection.geometry,selection.fps,MdMain.sourceDisplayId,session.sessionId,generation);progressPipe=eglPipe;eglPipe.requestFrameRate(latestFrameRateRequest);eglPipe.start();}
-            else {Class<?> dm=Class.forName("android.hardware.display.DisplayManager");Method mirror=dm.getDeclaredMethod("createVirtualDisplay",String.class,int.class,int.class,int.class,Surface.class);virtualDisplay=mirror.invoke(null,"CarLife-HULab-MediaCodec-"+generation,selection.width,selection.height,MdMain.sourceDisplayId,inputSurface);if(virtualDisplay==null)throw new IOException("display mirror API returned null");Object display=virtualDisplay.getClass().getMethod("getDisplay").invoke(virtualDisplay);Object displayId=display.getClass().getMethod("getDisplayId").invoke(display);MdMain.logFields("display_mirror_created","api",DISPLAY_API,"source_display_id",MdMain.sourceDisplayId,"virtual_display_id",displayId,"width",selection.width,"height",selection.height,"session_id",session.sessionId,"generation",generation,"input","real Android display mirror");}
+            else {virtualDisplay=Api28DisplayMirror.create("CarLife-HULab-MediaCodec-"+generation,selection.width,selection.height,MdMain.sourceDisplayId,inputSurface);MdMain.logFields("display_mirror_created","api",virtualDisplay.apiName(),"source_display_id",MdMain.sourceDisplayId,"virtual_display_id",virtualDisplay.virtualDisplayId(),"width",selection.width,"height",selection.height,"session_id",session.sessionId,"generation",generation,"input","real Android display mirror");}
             stage="drain";api="MediaCodec.dequeueOutputBuffer/getOutputBuffer/releaseOutputBuffer";
             Method getBuffer=codec.getClass().getMethod("getOutputBuffer",int.class);
             MediaCodec.BufferInfo info=new MediaCodec.BufferInfo();
@@ -238,7 +243,7 @@ final class MediaCodecDisplaySource implements Runnable {
             }catch(Exception e){return cleanupFailure(null,"egl_stop_drain",e);}
             if(eglPipe.failure!=null)failure=cleanupFailure(failure,"egl_pipe",eglPipe.failure);eglPipe=null;
         }
-        if(virtualDisplay!=null){try{virtualDisplay.getClass().getMethod("release").invoke(virtualDisplay);MdMain.logFields("display_mirror_released","session_id",session.sessionId,"generation",generation);}catch(Exception e){failure=cleanupFailure(failure,"virtual_display",e);}virtualDisplay=null;}
+        if(virtualDisplay!=null){try{virtualDisplay.release();MdMain.logFields("display_mirror_released","session_id",session.sessionId,"generation",generation);}catch(Exception e){failure=cleanupFailure(failure,"virtual_display",e);}virtualDisplay=null;}
         if(codec!=null&&codecStarted&&inputSurface!=null){try{codec.signalEndOfInputStream();long end=SystemClock.uptimeMillis()+600;int tail=0;MediaCodec.BufferInfo i=new MediaCodec.BufferInfo();while(SystemClock.uptimeMillis()<end){int n=codec.dequeueOutputBuffer(i,50000);if(n>=0){tail++;codec.releaseOutputBuffer(n,false);if((i.flags&MediaCodec.BUFFER_FLAG_END_OF_STREAM)!=0){eosObserved=true;break;}}}MdMain.logFields("codec_stop_drain","session_id",session.sessionId,"generation",generation,"discarded_tail_buffers",tail,"eos_observed",eosObserved);}catch(Exception e){failure=cleanupFailure(failure,"signal_drain_eos",e);}}
         if(inputSurface!=null){try{inputSurface.release();MdMain.logFields("input_surface_released","session_id",session.sessionId,"generation",generation);}catch(Exception e){failure=cleanupFailure(failure,"input_surface",e);}inputSurface=null;}
         if(codec!=null){if(codecStarted)try{codec.stop();MdMain.logFields("codec_stopped","session_id",session.sessionId,"generation",generation);}catch(Exception e){failure=cleanupFailure(failure,"codec_stop",e);}try{codec.release();MdMain.logFields("codec_released","session_id",session.sessionId,"generation",generation);}catch(Exception e){failure=cleanupFailure(failure,"codec_release",e);}codec=null;codecStarted=false;}

@@ -80,12 +80,14 @@ final class PlaybackActivity {
     /** The existing privileged app_process uses platform playback callbacks, with no APK or policy. */
     static final class AndroidSource implements Source {
         private AudioManager manager;private HandlerThread thread;private AudioManager.AudioPlaybackCallback callback;
-        private Method active,playerId;
+        private Method active,playerId,clientUid;
         public synchronized void start(final Observer observer)throws Exception{
             Class<?> config=Class.forName("android.media.AudioPlaybackConfiguration");
             active=config.getMethod("isActive");playerId=config.getMethod("getPlayerInterfaceId");
-            // This no-Context platform constructor is sufficient for these AudioService methods.
-            manager=(AudioManager)AudioManager.class.getConstructor().newInstance();
+            try{clientUid=config.getMethod("getClientUid");}catch(NoSuchMethodException ignored){clientUid=null;}
+            android.content.Context ctx=null;
+            try{ctx=AndroidRuntimeContext.get();}catch(Exception ignored){}
+            manager=ctx!=null?(AudioManager)ctx.getSystemService(android.content.Context.AUDIO_SERVICE):(AudioManager)AudioManager.class.getConstructor().newInstance();
             thread=new HandlerThread("carlife-playback-events");thread.start();
             callback=new AudioManager.AudioPlaybackCallback(){public void onPlaybackConfigChanged(List<AudioPlaybackConfiguration> configs){
                 // Preserve a rapid PAUSED -> STARTED pair queued for the same player.
@@ -103,12 +105,24 @@ final class PlaybackActivity {
             Set<Integer> output=new HashSet<Integer>(),media=new HashSet<Integer>(),speech=new HashSet<Integer>(),assistant=new HashSet<Integer>();
             for(AudioPlaybackConfiguration config:configs){
                 if(!((Boolean)active.invoke(config)).booleanValue())continue;
+                int uid=-1;
+                if(clientUid!=null){try{uid=((Integer)clientUid.invoke(config)).intValue();}catch(Throwable ignored){}}
                 int usage=config.getAudioAttributes().getUsage();
-                boolean music=AudioUsage.isMedia(usage);
-                if(!music&&!AudioUsage.isSpeech(usage)&&!AudioUsage.isAssistant(usage))continue;
+                boolean naviApp=uid>0&&AudioUsage.isNaviUid(uid);
+                boolean music,isSpeech,isAssistant;
+                if(naviApp){
+                    music=false;
+                    isSpeech=AudioUsage.hasSpeechLane();
+                    isAssistant=false;
+                }else{
+                    music=AudioUsage.isMedia(usage);
+                    isSpeech=!music&&AudioUsage.isSpeech(usage);
+                    isAssistant=!music&&!isSpeech&&AudioUsage.isAssistant(usage);
+                }
+                if(!music&&!isSpeech&&!isAssistant)continue;
                 int id=((Integer)playerId.invoke(config)).intValue();
                 if(id<=0)throw new IOException("playback player identity unavailable");
-                output.add(id);if(music)media.add(id);else if(AudioUsage.isSpeech(usage))speech.add(id);else assistant.add(id);
+                output.add(id);if(music)media.add(id);else if(isSpeech)speech.add(id);else assistant.add(id);
             }
             return new Snapshot(output,media,speech,assistant);
         }

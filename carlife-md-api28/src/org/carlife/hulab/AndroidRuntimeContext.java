@@ -38,8 +38,12 @@ final class AndroidRuntimeContext {
             if(thread==null)thread=at.getMethod("systemMain").invoke(null);
             context=(Context)at.getMethod("getSystemContext").invoke(thread);
             // ContextImpl uses the calling process UID/PID. Never substitute a package UID.
-            if(android.os.Build.VERSION.SDK_INT>=31&&context.getAttributionSource().getUid()!=android.os.Process.myUid())
-                throw new SecurityException("runtime attribution UID does not match process");
+            if(android.os.Build.VERSION.SDK_INT>=31){
+                Object attr=Context.class.getMethod("getAttributionSource").invoke(context);
+                int attrUid=((Integer)attr.getClass().getMethod("getUid").invoke(attr)).intValue();
+                if(attrUid!=android.os.Process.myUid())
+                    throw new SecurityException("runtime attribution UID does not match process");
+            }
         }catch(Throwable e){context=null;failure=e;}finally{ready.countDown();}
     }
 

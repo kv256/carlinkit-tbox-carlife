@@ -5,12 +5,12 @@ import java.util.ArrayDeque;
 
 /** Independent source worker; failures disable audio only, never the video source. */
 final class PcmAudioSession {
-    interface Source {void start()throws Exception;int read(byte[] p,int offset,int size)throws Exception;void close()throws Exception;}
+    interface Source {void start()throws Exception;int read(byte[] p,int offset,int size)throws Exception;void close()throws Exception;default void abort(){}}
     interface Factory {Source create();}
     interface Events {long now();void state(String state,String detail);void wakeWriter();}
     static final SourceLease LEASE=new SourceLease();
     final CarLifeAudio.Queue queue;final Factory factory;final Events events;final CarLifeAudio.Lane lane;final SourceLease leaseGuard;
-    private volatile Thread worker;private volatile boolean stop;private volatile boolean sourceActive;
+    private volatile Thread worker;private volatile Source activeSource;private volatile boolean stop;private volatile boolean sourceActive;
     private volatile boolean cleanupConfirmed=true;private String error;
     // Native MEDIA may keep its capture ready without claiming the HU audio source.
     // Only a real playback signal opens the wire; PCM amplitude is never a trigger.
@@ -57,6 +57,7 @@ final class PcmAudioSession {
         return true;
     }
     private void capture(long token){
+        try{android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO);}catch(Throwable ignored){}
         Source source=null;boolean lease=false,started=false;
         try{
             if(stop)return;
@@ -64,7 +65,7 @@ final class PcmAudioSession {
             if(stop)return;
             source=factory.create();if(source==null)throw new IOException("audio source factory returned null");
             if(stop)return;
-            source.start();long origin=now();
+            source.start();activeSource=source;long origin=now();
             synchronized(this){if(stop||(!warm||playbackActive)&&!openWire(token,now()))return;sourceActive=true;started=true;}
             state(warm?"warm_ready":"capturing",lane.rate+"Hz "+lane.channels+"ch PCM16LE; Android output; not microphone; sample-count timestamps");
             byte[] chunk=new byte[lane.chunkBytes];int used=0;long frames=0,chunkGeneration=0;
@@ -75,8 +76,9 @@ final class PcmAudioSession {
                     if(used==0)chunkGeneration=gateGeneration;
                 }
                 int n=source.read(chunk,used,chunk.length-used);
+                if(stop)break;
                 if(n<0||n>chunk.length-used)throw new IOException("invalid PCM source read "+n);
-                if(n==0){Thread.sleep(5);continue;}used+=n;
+                if(n==0){Thread.sleep(2);continue;}used+=n;
                 if(used==chunk.length){
                     int timestamp=(int)(origin+frames*1000L/lane.rate);
                     boolean offered=false;
@@ -96,6 +98,7 @@ final class PcmAudioSession {
         catch(Exception e){failed(e);}
         catch(LinkageError e){failed(new IOException("audio platform API unavailable",e));}
         finally{
+            activeSource=null;
             boolean released=source==null;
             if(source!=null)try{source.close();released=true;}catch(Exception e){failed(e);}catch(LinkageError e){failed(new IOException("audio source cleanup API unavailable",e));}
             synchronized(this){sourceActive=false;if(started)queue.stop(token,now());wireOpen=false;preroll.clear();gateGeneration++;cleanupConfirmed=released;}
@@ -104,7 +107,7 @@ final class PcmAudioSession {
         }
     }
     private void failed(Exception e){synchronized(this){error=e.getClass().getSimpleName()+": "+e.getMessage();}state("failed",error);}
-    synchronized void stop(){stop=true;playbackActive=false;wireOpen=false;preroll.clear();gateGeneration++;queue.stop(queue.epoch(),now());wakeWriter();Thread t=worker;if(t!=null)t.interrupt();}
+    synchronized void stop(){stop=true;playbackActive=false;wireOpen=false;preroll.clear();gateGeneration++;queue.stop(queue.epoch(),now());wakeWriter();Source s=activeSource;if(s!=null)try{s.abort();}catch(RuntimeException ignored){}Thread t=worker;if(t!=null)t.interrupt();}
     boolean active(){return sourceActive;}
     boolean retired(){Thread t=worker;return (t==null||!t.isAlive())&&cleanupConfirmed;}
     synchronized String error(){return error;}

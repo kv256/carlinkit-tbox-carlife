@@ -27,13 +27,14 @@ final class AndroidAccessoryIo implements AccessoryTransport.Io {
         try{
             opened=Os.open(PATH,OsConstants.O_RDWR|OsConstants.O_NONBLOCK|OsConstants.O_CLOEXEC,0);
             if(!OsConstants.S_ISCHR(Os.fstat(opened).st_mode))throw new IOException("accessory path is not a character device");
-            int flags=Os.fcntlInt(opened,OsConstants.F_GETFL,0);
+            int flags=((Integer)Os.class.getMethod("fcntlInt",FileDescriptor.class,int.class,int.class).invoke(null,opened,OsConstants.F_GETFL,0)).intValue();
             if((flags&OsConstants.O_NONBLOCK)==0)throw new IOException("accessory descriptor missing O_NONBLOCK");
             fd=opened;
         }catch(ErrnoException e){
             if(opened!=null)try{Os.close(opened);}catch(ErrnoException ignored){}
             throw new OpenFailure("accessory open/stat errno="+e.errno,e,e.errno==OsConstants.ENOENT||e.errno==OsConstants.ENODEV||e.errno==OsConstants.EBUSY||e.errno==OsConstants.ENXIO);
         }catch(IOException e){if(opened!=null)try{Os.close(opened);}catch(ErrnoException ignored){}throw e;}
+        catch(Exception e){if(opened!=null)try{Os.close(opened);}catch(ErrnoException ignored){}throw new IOException("accessory fcntl failed",e);}
     }
     private boolean poll(short events,int timeout)throws IOException{
         if(closed)throw new EOFException("accessory canceled");

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Switch QCOM-BTD from car-sink role to Phone (HFP AG + A2DP Source + AVRCP Target + PBAP PSE) -->
+    <bool name="profile_supported_hs_hfp">true</bool>
+    <bool name="profile_supported_a2dp">true</bool>
+    <bool name="profile_supported_avrcp_target">true</bool>
+    <bool name="profile_supported_pbap">true</bool>
+    <bool name="profile_supported_a2dp_sink">false</bool>
+    <bool name="profile_supported_avrcp_controller">false</bool>
+    <bool name="profile_supported_hfpclient">false</bool>
+</resources>
