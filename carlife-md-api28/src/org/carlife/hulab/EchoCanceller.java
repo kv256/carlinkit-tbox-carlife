@@ -104,6 +104,36 @@ final class EchoCanceller implements AutoCloseable {
     private final float[] dPrev = new float[N], ePrev = new float[N];
     private boolean nearState;
 
+    // ---------------- far-end gated residual suppression ----------------
+    // The Venza HU already suppresses echo in its CarLife mic (the mic even dips ~10 dB below the
+    // cabin noise at far-end onsets), leaving a residual at the noise floor that the linear filter
+    // cannot adapt on (car dumps: echo ~50 dB below the far-end level, ~527 ms after USB write).
+    // sdsdk816 then applies AGC to the quiet mic and noise suppression, which strips the road
+    // noise and exposes that residual to the far end. So while the far end is active inside the
+    // filter window, bins not clearly above the mic noise floor are attenuated and refilled with
+    // comfort noise; near-end speech (15-40 dB above the floor in car dumps) passes.
+    private final float[] refBlockE;
+    private final float[] noiseFloor = new float[BINS], gateSm = new float[BINS];
+    private final float[] echoPow = new float[BINS];
+    private final boolean[] nearBin = new boolean[BINS];
+    private final float gateDuck, gateSnr, gateEchoOver, gateCohMax;
+    // Far/near coherence at every partition lag of the filter window (the linear filter rarely
+    // converges on this HU, so its peak partition says nothing about where the echo is). Echo
+    // bursts that leak through the HU suppressor are strongly coherent (car dump: 0.4-0.6 at
+    // ~527 ms), near-end speech is not.
+    private final float[][] mlRe, mlIm, mlXX;
+    private final float[] bandCoh, cohBin = new float[BINS];
+    private int cohLag = -1;
+    private float statCohMax = 0f;
+    private int statCohLag = -1;
+    private int farHang, noiseBlocks;
+    private long statGateBlocks, statGateBins, statGatePassBins;
+    private final java.util.Random cng = new java.util.Random(0x5eed);
+    private static final float GATE_FAR_ENERGY = N * 200f * 200f;   // ~ -44 dBFS far-end block rms
+    private static final int GATE_HANG_BLOCKS = 12;                  // 96 ms after the window empties
+    private static final int NOISE_INIT_BLOCKS = 40;                 // 320 ms unconditional floor init
+    private static final float CNG_LEVEL = 0.5f;                     // comfort noise at -3 dB re floor
+
     // ---------------- delay estimator ----------------
     private final float[] farMean = new float[DELAY_BANDS], nearMean = new float[DELAY_BANDS];
     private final int[] farHist = new int[MAX_LAG_BLOCKS];
@@ -159,6 +189,20 @@ final class EchoCanceller implements AutoCloseable {
         fgRe = new float[this.partitions][BINS];
         fgIm = new float[this.partitions][BINS];
         xPowPart = new float[this.partitions][BINS];
+        refBlockE = new float[this.partitions];
+        // level 1/2/3: duck -10/-20/-30 dB; a bin is near-end speech when it exceeds the noise
+        // floor by +6/+8/+10 dB and the learned residual-echo level by +3/+5/+7 dB
+        this.gateDuck = tun("aec.gate_duck", this.nlpLevel <= 1 ? 0.32f : this.nlpLevel == 2 ? 0.1f : 0.032f);
+        this.gateSnr = tun("aec.gate_snr", this.nlpLevel <= 1 ? 4f : this.nlpLevel == 2 ? 6.3f : 10f);
+        this.gateEchoOver = tun("aec.gate_echo", this.nlpLevel <= 1 ? 2f : this.nlpLevel == 2 ? 3.2f : 5f);
+        // ...and its coherence with the far end (best lag, 3-bin average) is below 0.35/0.2/0.13
+        // (car-dump replay at level 2: leaked echo bursts -14.5 dB, real double talk -2 dB)
+        this.gateCohMax = tun("aec.gate_coh", this.nlpLevel <= 1 ? 0.35f : this.nlpLevel == 2 ? 0.2f : 0.13f);
+        mlRe = new float[this.partitions][BINS];
+        mlIm = new float[this.partitions][BINS];
+        mlXX = new float[this.partitions][BINS];
+        bandCoh = new float[this.partitions];
+        Arrays.fill(gateSm, 1f);
         for (int i = 0; i < M; i++) {
             window[i] = (float) Math.sqrt(0.5 - 0.5 * Math.cos(2 * Math.PI * i / M));
         }
@@ -325,6 +369,9 @@ final class EchoCanceller implements AutoCloseable {
             for (int k = K - 1; k >= 0; k--) {
                 int slot = (head - k + K) % K;
                 readRef(r0 - (long) k * N - N, frame, 0, M);
+                float be = 0f;
+                for (int i = N; i < M; i++) be += frame[i] * frame[i];
+                refBlockE[slot] = be;
                 rfft(frame, xRe[slot], xIm[slot]);
                 for (int f = 0; f < BINS; f++) {
                     float p = xRe[slot][f] * xRe[slot][f] + xIm[slot][f] * xIm[slot][f];
@@ -345,6 +392,7 @@ final class EchoCanceller implements AutoCloseable {
 
         double xE = 0;
         for (int i = N; i < M; i++) xE += frame[i] * frame[i];
+        refBlockE[head] = (float) xE;
 
         // ---- background (adapting) and foreground (output) echo estimates ----
         echoEstimate(wRe, wIm, y);
@@ -524,6 +572,8 @@ final class EchoCanceller implements AutoCloseable {
         else if (deAvg < 0.95f || xdAvg < 0.8f) nearState = false;
         boolean suppress = farPresent && !nearState;
         if (suppress) statSuppressedBlocks++;
+        updateLagCoherence(a, b);
+        boolean gate = updateGate();
 
         for (int f = 0; f < BINS; f++) {
             float h;
@@ -541,13 +591,125 @@ final class EchoCanceller implements AutoCloseable {
             }
             float g = h < gainSm[f] ? h : 0.5f * gainSm[f] + 0.5f * h;
             gainSm[f] = g;
-            eRe[f] *= g;
-            eIm[f] *= g;
+            // far-end gate: instant attack, ~3-block release
+            float gt = !gate || f == 0 || nearBin[f] ? 1f : gateDuck;
+            float gs = gt < gateSm[f] ? gt : gateSm[f] + 0.3f * (gt - gateSm[f]);
+            gateSm[f] = gs;
+            eRe[f] *= g * gs;
+            eIm[f] *= g * gs;
+            if (gs < 0.999f && f > 0) {
+                float amp = (float) Math.sqrt((1f - gs * gs) * noiseFloor[f] * CNG_LEVEL);
+                double ph = cng.nextDouble() * 2 * Math.PI;
+                eRe[f] += amp * (float) Math.cos(ph);
+                eIm[f] += amp * (float) Math.sin(ph);
+            }
         }
         irfft(eRe, eIm, tmp);
         for (int i = 0; i < N; i++) pushOut(ola[i] + tmp[i] * window[i]);
         for (int i = 0; i < N; i++) ola[i] = tmp[N + i] * window[N + i];
     }
+
+    /**
+     * Updates the far-end window state, the mic noise floor and the per-bin near-end decision.
+     * Returns true while the far end is active inside the filter window (plus hangover).
+     */
+    private boolean updateGate() {
+        float farMax = 0f;
+        for (float v : refBlockE) if (v > farMax) farMax = v;
+        if (farMax > GATE_FAR_ENERGY) farHang = GATE_HANG_BLOCKS;
+        else if (farHang > 0) farHang--;
+        boolean gate = farHang > 0;
+        if (gate) statGateBlocks++;
+        // Noise floor (minimum tracking on the smoothed mic spectrum). Frozen inside the echo
+        // window: the HU ducks its mic at far-end onsets, which would drag the floor down.
+        if (noiseBlocks < NOISE_INIT_BLOCKS || !gate) {
+            boolean init = noiseBlocks == 0;
+            for (int f = 0; f < BINS; f++) {
+                float s = sd[f];
+                if (init) noiseFloor[f] = s;
+                else if (s < noiseFloor[f]) noiseFloor[f] = 0.8f * noiseFloor[f] + 0.2f * s;
+                else noiseFloor[f] *= 1.003f;   // ~ +1.6 dB/s
+                if (noiseFloor[f] < 1f) noiseFloor[f] = 1f;
+            }
+            noiseBlocks++;
+        }
+        if (gate) {
+            // Residual-echo level per bin, learned while the far end is active and the mic is only
+            // moderately above its floor (near-end speech is far louder). It is not scaled by the
+            // far-end level: the HU's own suppressor keeps its residual roughly level-independent
+            // (a linear coupling overshot loud far-end bursts by 15-24 dB in car dumps). Rises fast,
+            // decays slowly, so the estimate stays on the high side of the residual.
+            double sdBand = 0, nfBand = 0;
+            for (int f = NLP_LO; f < NLP_HI; f++) {
+                sdBand += sd[f];
+                nfBand += noiseFloor[f];
+            }
+            boolean learn = farHang == GATE_HANG_BLOCKS && sdBand < 20.0 * nfBand;
+            if (learn) {
+                for (int f = 0; f < BINS; f++) {
+                    float r = Math.max(0f, sd[f] - noiseFloor[f]);
+                    echoPow[f] += (r - echoPow[f]) * (r > echoPow[f] ? 0.05f : 0.005f);
+                }
+            }
+            boolean prev = false, cur = nearAbove(0);
+            for (int f = 0; f < BINS; f++) {
+                boolean next = f + 1 < BINS && nearAbove(f + 1);
+                nearBin[f] = cur || prev || next;   // +-1 bin dilation keeps speech harmonics whole
+                if (f >= NLP_LO && f < NLP_HI) {
+                    statGateBins++;
+                    if (nearBin[f]) statGatePassBins++;
+                }
+                prev = cur;
+                cur = next;
+            }
+        }
+        return gate;
+    }
+
+    private boolean nearAbove(int f) {
+        return sd[f] > gateSnr * noiseFloor[f] && sd[f] > gateEchoOver * echoPow[f] && cohBin[f] < gateCohMax;
+    }
+
+    /** Smoothed far/near cross-spectra per window lag; picks the most coherent lag (sd must be current). */
+    private void updateLagCoherence(float a, float b) {
+        final int K = partitions;
+        int best = 0;
+        float bestCoh = -1f;
+        for (int k = 0; k < K; k++) {
+            int slot = (head - k + K) % K;
+            float[] xr = xRe[slot], xi = xIm[slot], cr = mlRe[k], ci = mlIm[k], cx = mlXX[k];
+            double sum = 0;
+            for (int f = 1; f < BINS; f++) {
+                float ar = xr[f], ai = xi[f], dr = dRe[f], di = dIm[f];
+                cr[f] = a * cr[f] + b * (ar * dr + ai * di);
+                ci[f] = a * ci[f] + b * (ai * dr - ar * di);
+                cx[f] = a * cx[f] + b * (ar * ar + ai * ai);
+                if (f >= NLP_LO && f < NLP_HI) sum += (cr[f] * cr[f] + ci[f] * ci[f]) / (cx[f] * sd[f] + 1e-10f);
+            }
+            bandCoh[k] = (float) (sum / (NLP_HI - NLP_LO));
+            if (bandCoh[k] > bestCoh) {
+                bestCoh = bandCoh[k];
+                best = k;
+            }
+        }
+        cohLag = best;
+        float[] cr = mlRe[best], ci = mlIm[best], cx = mlXX[best];
+        for (int f = 0; f < BINS; f++) {
+            float c = f == 0 ? 0f : (cr[f] * cr[f] + ci[f] * ci[f]) / (cx[f] * sd[f] + 1e-10f);
+            if (c > 1f) c = 1f;
+            tmpCoh[f] = c;
+        }
+        for (int f = 0; f < BINS; f++) {
+            float l = f > 0 ? tmpCoh[f - 1] : tmpCoh[f], r = f + 1 < BINS ? tmpCoh[f + 1] : tmpCoh[f];
+            cohBin[f] = (l + tmpCoh[f] + r) / 3f;
+        }
+        if (bestCoh > statCohMax && farHang > 0) {
+            statCohMax = bestCoh;
+            statCohLag = bulkBlocks + best;
+        }
+    }
+
+    private final float[] tmpCoh = new float[BINS];
 
     private float cohDe(int f) {
         float num = sdeRe[f] * sdeRe[f] + sdeIm[f] * sdeIm[f];
@@ -663,6 +825,11 @@ final class EchoCanceller implements AutoCloseable {
         }
         bulkBlocks = newBulk;
         rebuildHistory = true;
+        for (int k = 0; k < partitions; k++) {
+            Arrays.fill(mlRe[k], 0f);
+            Arrays.fill(mlIm[k], 0f);
+            Arrays.fill(mlXX[k], 0f);
+        }
         delayChanges++;
         updatePeakPartition();
     }
@@ -707,6 +874,12 @@ final class EchoCanceller implements AutoCloseable {
         add(f, "erle_db", Double.isNaN(erleDb) ? null : Math.round(erleDb * 10) / 10.0);
         add(f, "far_active_pct", statBlocks == 0 ? 0 : statFarBlocks * 100 / statBlocks);
         add(f, "suppressed_pct", statBlocks == 0 ? 0 : statSuppressedBlocks * 100 / statBlocks);
+        add(f, "gate_pct", statBlocks == 0 ? 0 : statGateBlocks * 100 / statBlocks);
+        add(f, "gate_pass_pct", statGateBins == 0 ? 0 : statGatePassBins * 100 / statGateBins);
+        // most coherent far/near lag seen in the interval (USB write -> mic arrival), for checking
+        // the bulk delay against the car; coherence ~0.1 is chance level
+        add(f, "coh_lag_ms", statCohLag < 0 ? -1 : statCohLag * N / SAMPLES_PER_MS);
+        add(f, "coh_max", Math.round(statCohMax * 100) / 100.0);
         add(f, "bypass_pct", statBlocks == 0 ? 0 : statOutD * 100 / statBlocks);
         add(f, "near_state", nearState);
         add(f, "cpu_us_per_block", statBlocks == 0 ? 0 : statCpuNs / statBlocks / 1000);
@@ -720,7 +893,9 @@ final class EchoCanceller implements AutoCloseable {
         add(f, "delay_changes", delayChanges);
         add(f, "nlp_level", nlpLevel);
         statD = statE = 0;
-        statFarBlocks = statBlocks = statSuppressedBlocks = statCpuNs = statOutD = 0;
+        statFarBlocks = statBlocks = statSuppressedBlocks = statCpuNs = statOutD = statGateBlocks = statGateBins = statGatePassBins = 0;
+        statCohMax = 0f;
+        statCohLag = -1;
         return f.toArray();
     }
 

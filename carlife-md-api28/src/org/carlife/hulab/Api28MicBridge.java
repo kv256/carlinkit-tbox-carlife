@@ -92,7 +92,9 @@ final class Api28MicBridge implements AutoCloseable {
     static final String PROP_AEC_DELAY = "persist.tbox.carlife.aec.delay"; // auto (default) | fixed ms
     static final String PROP_AEC_DUMP = "persist.tbox.carlife.aec.dump";   // 1 = dump PCM to /cache/carlife/aec
     private static final int AEC_PARTITIONS = 24;      // 192 ms echo tail
-    private static final int AEC_INITIAL_DELAY_MS = 200;
+    // Venza echo arrives ~520-527 ms after the USB write (two car calls); the 192 ms window then
+    // spans ~496-688 ms. The automatic estimator rarely locks on this HU's quiet, pre-suppressed mic.
+    private static final int AEC_INITIAL_DELAY_MS = 520;
     private volatile EchoCanceller aec;
     private boolean aecDisabledThisSession;
     private long aecDropSeen;
@@ -534,8 +536,8 @@ final class Api28MicBridge implements AutoCloseable {
         java.io.File dump = null;
         if ("1".equals(String.valueOf(AudioUsage.prop(PROP_AEC_DUMP, "0")).trim())) {
             java.io.File root = new java.io.File("/cache/carlife/aec");
-            pruneDumps(root, 2);
-            dump = new java.io.File(root, String.valueOf(System.currentTimeMillis()));
+            int seq = pruneDumps(root, 2);
+            dump = new java.io.File(root, String.format(java.util.Locale.US, "%04d-%d", seq, System.currentTimeMillis()));
         }
         try {
             aec = new EchoCanceller(AEC_PARTITIONS, delayMs, level, AEC_INITIAL_DELAY_MS, dump);
@@ -550,18 +552,31 @@ final class Api28MicBridge implements AutoCloseable {
         }
     }
 
-    /** Keeps only the newest {@code keep} dump directories so /cache (232 MB) never fills up. */
-    private static void pruneDumps(java.io.File root, int keep) {
+    /**
+     * Keeps only the newest {@code keep} dump directories so /cache (232 MB) never fills up and
+     * returns the next sequence number. Directories are named "<seq>-<wall ms>": the box clock
+     * reads 2009 until it syncs, so wall time alone does not order dumps (legacy names sort first).
+     */
+    private static int pruneDumps(java.io.File root, int keep) {
         java.io.File[] dirs = root.listFiles();
-        if (dirs == null || dirs.length <= keep) return;
+        if (dirs == null) return 0;
         Arrays.sort(dirs, new java.util.Comparator<java.io.File>() {
-            public int compare(java.io.File a, java.io.File b) { return a.getName().compareTo(b.getName()); }
+            public int compare(java.io.File a, java.io.File b) { return Integer.compare(dumpSeq(a), dumpSeq(b)); }
         });
+        int next = dirs.length == 0 ? 0 : Math.max(0, dumpSeq(dirs[dirs.length - 1]) + 1) % 10000;
         for (int i = 0; i < dirs.length - keep; i++) {
             java.io.File[] files = dirs[i].listFiles();
             if (files != null) for (java.io.File f : files) f.delete();
             dirs[i].delete();
         }
+        return next;
+    }
+
+    private static int dumpSeq(java.io.File dir) {
+        String n = dir.getName();
+        int dash = n.indexOf('-');
+        if (dash != 4) return -1;
+        try { return Integer.parseInt(n.substring(0, 4)); } catch (NumberFormatException e) { return -1; }
     }
 
     private void closeAec(String reason) {
