@@ -41,6 +41,11 @@ public class MainActivity extends Activity {
     private static final String PROP_AEC = "persist.tbox.carlife.aec";
     private static final String[] AEC_VALUES = {"off", "1", "2", "3"};
     private static final String[] AEC_LABELS = {"关", "弱", "中", "强"};
+    // Phone <-> box Bluetooth (sdsdk816 "AutoKit-TBox"): calls + music, or music only so the
+    // phone's calls stay on the head unit's own Bluetooth. Applied by carlife-daemon.sh.
+    private static final String PROP_BT_PHONE = "persist.tbox.carlife.bt.phone";
+    private static final String[] BT_PHONE_VALUES = {"all", "media"};
+    private static final String[] BT_PHONE_LABELS = {"音乐+电话", "仅音乐"};
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -56,6 +61,7 @@ public class MainActivity extends Activity {
     private TextView naviUsbBtn, naviBtBtn;
     private TextView callUsbBtn, callBtBtn;
     private final TextView[] aecBtns = new TextView[4];
+    private final TextView[] btPhoneBtns = new TextView[2];
 
     private volatile int currentMode = MODE_CARPLAY;
     private volatile boolean currentWifiAdbOn = false;
@@ -123,7 +129,7 @@ public class MainActivity extends Activity {
         left.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("Carlinkit Tbox 三模式与音频路由 · v1.5");
+        sub.setText("Carlinkit Tbox 三模式与音频路由 · v" + appVersion());
         sub.setTextColor(Color.parseColor("#94A3B8"));
         sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         sub.setPadding(0, dp(2), 0, dp(10));
@@ -188,7 +194,7 @@ public class MainActivity extends Activity {
         LinearLayout row1 = new LinearLayout(this);
         row1.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams row1Lp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1.00f);
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 0.72f);
         row1Lp.setMargins(0, 0, 0, dp(10));
         row1.setLayoutParams(row1Lp);
 
@@ -232,10 +238,10 @@ public class MainActivity extends Activity {
         // Row 2: CarLife Audio Routing Card (Media / Navi / Call -> USB vs Bluetooth, live hot-reload!)
         LinearLayout audioPanel = new LinearLayout(this);
         audioPanel.setOrientation(LinearLayout.VERTICAL);
-        audioPanel.setPadding(dp(14), dp(10), dp(14), dp(10));
+        audioPanel.setPadding(dp(12), dp(8), dp(12), dp(8));
         audioPanel.setBackground(roundRect(Color.parseColor("#1E293B"), 14, Color.parseColor("#7C3AED"), 1));
         LinearLayout.LayoutParams row2Lp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 0.92f);
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1.45f);
         row2Lp.setMargins(0, 0, 0, dp(10));
         audioPanel.setLayoutParams(row2Lp);
 
@@ -244,39 +250,57 @@ public class MainActivity extends Activity {
         audioTitle.setTextColor(Color.parseColor("#DDD6FE"));
         audioTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
         audioTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        audioTitle.setPadding(0, 0, 0, dp(8));
+        audioTitle.setPadding(dp(2), 0, 0, dp(6));
         audioPanel.addView(audioTitle);
 
-        LinearLayout segRow = new LinearLayout(this);
-        segRow.setOrientation(LinearLayout.HORIZONTAL);
-        segRow.setLayoutParams(new LinearLayout.LayoutParams(
+        LinearLayout grid = new LinearLayout(this);
+        grid.setOrientation(LinearLayout.HORIZONTAL);
+        grid.setLayoutParams(new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1.0f));
+        LinearLayout gridLeft = makeGridColumn(true);
+        LinearLayout gridRight = makeGridColumn(false);
+        grid.addView(gridLeft);
+        grid.addView(gridRight);
 
         TextView[] mediaBtns = new TextView[2];
-        segRow.addView(makeAudioRouteColumn("媒体音频", "音乐 / 视频 / 提示", PROP_AUDIO_MEDIA, "媒体音频", mediaBtns, true));
+        gridLeft.addView(makeAudioRouteRow("媒体音频", "音乐 / 视频 / 提示音", PROP_AUDIO_MEDIA, "媒体音频", mediaBtns));
         mediaUsbBtn = mediaBtns[0];
         mediaBtBtn = mediaBtns[1];
 
         TextView[] naviBtns = new TextView[2];
-        segRow.addView(makeAudioRouteColumn("导航音频", "高德 / 地图播报", PROP_AUDIO_NAVI, "导航音频", naviBtns, true));
+        gridLeft.addView(makeAudioRouteRow("导航音频", "高德 / 地图播报", PROP_AUDIO_NAVI, "导航音频", naviBtns));
         naviUsbBtn = naviBtns[0];
         naviBtBtn = naviBtns[1];
 
         TextView[] callBtns = new TextView[2];
-        segRow.addView(makeAudioRouteColumn("电话音频", "推荐 USB；蓝牙需手机直连车机", PROP_AUDIO_CALL, "电话音频", callBtns, true));
+        gridLeft.addView(makeAudioRouteRow("电话音频", "蓝牙 = 手机直连车机", PROP_AUDIO_CALL, "电话音频", callBtns));
         callUsbBtn = callBtns[0];
         callBtBtn = callBtns[1];
 
-        segRow.addView(makeAecColumn());
+        gridRight.addView(makeChoiceRow("手机蓝牙", "手机连盒子的通道，立即重连", PROP_BT_PHONE,
+                BT_PHONE_VALUES, BT_PHONE_LABELS, btPhoneBtns, "（立即重连手机）"));
+        gridRight.addView(makeChoiceRow("通话回声消除", "USB 电话，下一通生效", PROP_AEC,
+                AEC_VALUES, AEC_LABELS, aecBtns, "（下一通电话生效）"));
 
-        audioPanel.addView(segRow);
+        TextView tip = new TextView(this);
+        tip.setText("经盒子通话：电话 USB · 手机蓝牙 音乐+电话\n原车蓝牙通话：电话 蓝牙 · 手机蓝牙 仅音乐（车机只连电话）");
+        tip.setTextColor(Color.parseColor("#94A3B8"));
+        tip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        tip.setLineSpacing(dp(2), 1.0f);
+        tip.setGravity(Gravity.CENTER_VERTICAL);
+        tip.setPadding(dp(12), 0, dp(8), 0);
+        tip.setBackground(roundRect(Color.parseColor("#0F172A"), 10, Color.parseColor("#1E293B"), 1));
+        tip.setLayoutParams(new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        gridRight.addView(tip);
+
+        audioPanel.addView(grid);
         right.addView(audioPanel);
 
         // Row 3: Wi-Fi ADB toggle | Reboot Bootloader
         LinearLayout row3 = new LinearLayout(this);
         row3.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams row3Lp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 0.72f);
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 0.55f);
         row3.setLayoutParams(row3Lp);
 
         wifiCard = new LinearLayout(this);
@@ -319,116 +343,120 @@ public class MainActivity extends Activity {
         setContentView(root);
     }
 
-    private LinearLayout makeAudioRouteColumn(
-            String label, String hint, String propKey, String toastLabel,
-            TextView[] outBtns, boolean rightMargin) {
+    private LinearLayout makeGridColumn(boolean leftSide) {
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
-        col.setGravity(Gravity.CENTER_VERTICAL);
-        col.setPadding(dp(10), dp(6), dp(10), dp(6));
-        col.setBackground(roundRect(Color.parseColor("#0F172A"), 10, Color.parseColor("#334155"), 1));
-        LinearLayout.LayoutParams colLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
-        if (rightMargin) {
-            colLp.setMargins(0, 0, dp(8), 0);
-        }
-        col.setLayoutParams(colLp);
-
-        TextView t = new TextView(this);
-        t.setText(label);
-        t.setTextColor(Color.WHITE);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        col.addView(t);
-
-        TextView s = new TextView(this);
-        s.setText(hint);
-        s.setTextColor(Color.parseColor("#94A3B8"));
-        s.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        s.setPadding(0, dp(1), 0, dp(6));
-        col.addView(s);
-
-        LinearLayout btnRow = new LinearLayout(this);
-        btnRow.setOrientation(LinearLayout.HORIZONTAL);
-        btnRow.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-
-        TextView usbBtn = makeToggleBtn("USB");
-        usbBtn.setOnClickListener(v -> setAudioRoute(propKey, "usb", toastLabel + " → USB (CarLife)"));
-        LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        lp1.setMargins(0, 0, dp(5), 0);
-        usbBtn.setLayoutParams(lp1);
-        btnRow.addView(usbBtn);
-
-        TextView btBtn = makeToggleBtn("蓝牙");
-        String btToast = PROP_AUDIO_CALL.equals(propKey)
-                ? toastLabel + " → 蓝牙 (需手机直连车机)"
-                : toastLabel + " → 蓝牙 (车机/QCOM-BTD)";
-        btBtn.setOnClickListener(v -> setAudioRoute(propKey, "bt", btToast));
-        LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        btBtn.setLayoutParams(lp2);
-        btnRow.addView(btBtn);
-
-        col.addView(btnRow);
-        outBtns[0] = usbBtn;
-        outBtns[1] = btBtn;
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
+        if (leftSide) lp.setMargins(0, 0, dp(5), 0);
+        else lp.setMargins(dp(5), 0, 0, 0);
+        col.setLayoutParams(lp);
         return col;
     }
 
-    /** USB call echo cancellation strength (read by MdMain at the start of each call). */
-    private LinearLayout makeAecColumn() {
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        col.setGravity(Gravity.CENTER_VERTICAL);
-        col.setPadding(dp(10), dp(6), dp(10), dp(6));
-        col.setBackground(roundRect(Color.parseColor("#0F172A"), 10, Color.parseColor("#334155"), 1));
-        col.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+    /** One setting per row: title + hint on the left, a segmented button group on the right. */
+    private LinearLayout makeSettingRow(String title, String hint, String[] labels,
+            View.OnClickListener[] clicks, TextView[] outBtns) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(4), dp(8), dp(4));
+        row.setBackground(roundRect(Color.parseColor("#0F172A"), 10, Color.parseColor("#334155"), 1));
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+        rowLp.setMargins(0, 0, 0, dp(6));
+        row.setLayoutParams(rowLp);
 
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        text.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.85f));
         TextView t = new TextView(this);
-        t.setText("通话回声消除");
+        t.setText(title);
         t.setTextColor(Color.WHITE);
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         t.setTypeface(Typeface.DEFAULT_BOLD);
-        col.addView(t);
+        t.setSingleLine(true);
+        text.addView(t);
+        TextView h = new TextView(this);
+        h.setText(hint);
+        h.setTextColor(Color.parseColor("#94A3B8"));
+        h.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        h.setSingleLine(true);
+        h.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        h.setPadding(0, dp(1), 0, 0);
+        text.addView(h);
+        row.addView(text);
 
-        TextView s = new TextView(this);
-        s.setText("USB 电话；下一通电话生效");
-        s.setTextColor(Color.parseColor("#94A3B8"));
-        s.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        s.setPadding(0, dp(1), 0, dp(6));
-        col.addView(s);
-
-        LinearLayout btnRow = new LinearLayout(this);
-        btnRow.setOrientation(LinearLayout.HORIZONTAL);
-        btnRow.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        for (int i = 0; i < AEC_VALUES.length; i++) {
-            final String value = AEC_VALUES[i];
-            final String label = AEC_LABELS[i];
-            TextView b = makeToggleBtn(label);
-            b.setOnClickListener(v -> {
-                if (!ensureRootOrPrompt()) return;
-                runRootCommand("setprop " + PROP_AEC + " " + value, "通话回声消除 → " + label + "（下一通电话生效）");
-            });
+        LinearLayout btns = new LinearLayout(this);
+        btns.setOrientation(LinearLayout.HORIZONTAL);
+        btns.setGravity(Gravity.CENTER_VERTICAL);
+        btns.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.15f));
+        for (int i = 0; i < labels.length; i++) {
+            TextView b = makeToggleBtn(labels[i]);
+            b.setSingleLine(true);
+            b.setOnClickListener(clicks[i]);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-            if (i < AEC_VALUES.length - 1) lp.setMargins(0, 0, dp(4), 0);
+            if (i < labels.length - 1) lp.setMargins(0, 0, dp(4), 0);
             b.setLayoutParams(lp);
-            btnRow.addView(b);
-            aecBtns[i] = b;
+            btns.addView(b);
+            outBtns[i] = b;
         }
-        col.addView(btnRow);
-        return col;
+        row.addView(btns);
+        return row;
+    }
+
+    private LinearLayout makeAudioRouteRow(String label, String hint, final String propKey,
+            final String toastLabel, TextView[] outBtns) {
+        final String btToast = PROP_AUDIO_CALL.equals(propKey)
+                ? toastLabel + " → 蓝牙 (需手机直连车机)"
+                : toastLabel + " → 蓝牙 (车机/QCOM-BTD)";
+        View.OnClickListener[] clicks = {
+                v -> setAudioRoute(propKey, "usb", toastLabel + " → USB (CarLife)"),
+                v -> setAudioRoute(propKey, "bt", btToast)
+        };
+        return makeSettingRow(label, hint, new String[]{"USB", "蓝牙"}, clicks, outBtns);
+    }
+
+    /** A row of mutually exclusive buttons that sets one root property. */
+    private LinearLayout makeChoiceRow(final String title, String hint, final String prop,
+            final String[] values, final String[] labels, TextView[] outBtns, final String toastSuffix) {
+        View.OnClickListener[] clicks = new View.OnClickListener[values.length];
+        for (int i = 0; i < values.length; i++) {
+            final String value = values[i];
+            final String label = labels[i];
+            clicks[i] = v -> {
+                if (!ensureRootOrPrompt()) return;
+                runRootCommand("setprop " + prop + " " + value, title + " → " + label + toastSuffix);
+            };
+        }
+        return makeSettingRow(title, hint, labels, clicks, outBtns);
+    }
+
+    private String appVersion() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "?";
+        }
     }
 
     private void styleAec(String value) {
         String v = value == null || value.trim().isEmpty() ? "2" : value.trim().toLowerCase(Locale.US);
         if (v.equals("0") || v.equals("false")) v = "off";
+        styleChoice(AEC_VALUES, aecBtns, v, "2");
+    }
+
+    private void styleBtPhone(String value) {
+        String v = value == null ? "" : value.trim().toLowerCase(Locale.US);
+        styleChoice(BT_PHONE_VALUES, btPhoneBtns, v, "all");
+    }
+
+    private void styleChoice(String[] values, TextView[] btns, String v, String def) {
         boolean known = false;
-        for (String a : AEC_VALUES) if (a.equals(v)) known = true;
-        if (!known) v = "2";
-        for (int i = 0; i < AEC_VALUES.length; i++) {
-            TextView b = aecBtns[i];
+        for (String a : values) if (a.equals(v)) known = true;
+        if (!known) v = def;
+        for (int i = 0; i < values.length; i++) {
+            TextView b = btns[i];
             if (b == null) continue;
-            if (AEC_VALUES[i].equals(v)) {
+            if (values[i].equals(v)) {
                 b.setBackground(roundRect(Color.parseColor("#7C3AED"), 8, Color.parseColor("#A78BFA"), 1));
                 b.setTextColor(Color.WHITE);
             } else {
@@ -586,6 +614,7 @@ public class MainActivity extends Activity {
             String pNavi = getProp(PROP_AUDIO_NAVI);
             String pCall = getProp(PROP_AUDIO_CALL);
             String pAec = getProp(PROP_AEC);
+            String pBtPhone = getProp(PROP_BT_PHONE);
             String usbState = getProp("sys.usb.state");
             String usbConfig = getProp("sys.usb.config");
             String tcpPort = getProp("service.adb.tcp.port");
@@ -652,6 +681,7 @@ public class MainActivity extends Activity {
                 styleTogglePair(naviUsbBtn, naviBtBtn, nUsb);
                 styleTogglePair(callUsbBtn, callBtBtn, cUsb);
                 styleAec(pAec);
+                styleBtPhone(pBtPhone);
 
                 String ipText = ip.isEmpty() ? "未连接 Wi-Fi" : ip;
                 String wifiAdbText = wifiOn
@@ -667,7 +697,8 @@ public class MainActivity extends Activity {
                 }
                 sb.append("音频：媒体 ").append(mUsb ? "USB" : "蓝牙")
                   .append(" · 导航 ").append(nUsb ? "USB" : "蓝牙")
-                  .append(" · 电话 ").append(cUsb ? "USB" : "蓝牙").append('\n');
+                  .append(" · 电话 ").append(cUsb ? "USB" : "蓝牙")
+                  .append(" · 手机蓝牙 ").append("media".equals(pBtPhone.trim()) ? "仅音乐" : "音乐+电话").append('\n');
                 sb.append("USB 状态：").append(usbSummary).append('\n');
                 sb.append("Wi-Fi IP：").append(ipText).append('\n');
                 sb.append("Wi-Fi ADB：").append(wifiAdbText);
