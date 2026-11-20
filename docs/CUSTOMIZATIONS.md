@@ -24,6 +24,9 @@
    - 二值谱匹配自动估计回声延迟（0–800 ms，跨通话记忆）+ 24×8 ms 分块频域 NLMS（前景/背景双滤波器抗双讲）+ AEC2 式相干性残余回声抑制（WOLA）；
    - 仿真（真实语音 + 车内脉冲响应 + 260 ms 延迟）：远端单讲抑制 32.6 dB，近端单讲无损，盒子实测每 8 ms 块约 0.7 ms CPU；
    - 原因：盒子 `sdsdk816` 内置的是 WebRTC 移动版 AECM（`EchoControlMobile`），延迟提示按本地扬声器设计，无法覆盖 USB → 车机 → 扬声器 → 车机麦 → USB 的长链路（CarPlay 模式同样有回音也是同一原因，CarPlay 链路不经过本项目代码）。
+   - Round 6（第一次上车数据修正）：车机 CarLife 麦克风本身已做回声抑制（远端开口时麦克风会先降到底噪以下约 10 dB），残留回声与车内底噪同级，线性滤波器无从收敛，旧版延迟估计从未锁定（`estimated_delay_ms=-1`）、抑制率约 0%；`sdsdk816` 随后对很小的麦克风电平做 WebRTC AGC + 降噪，去掉路噪后把这点残留回声放大给了对方。实测回声在 USB 写入后约 520–527 ms 到达，另有偶发的强相关回声突发（车机抑制漏过，相关系数 0.4–0.6）。
+   - 新增远端门控残余回声抑制：远端在滤波窗口内活跃时，逐频点判定近端语音（同时高于麦克风底噪、学习到的残余回声电平，且与远端在最相关延迟上的相干性低），其余频点压低（弱/中/强 = −10/−20/−30 dB）并补舒适噪声；初始延迟改为 520 ms（窗口 496–688 ms）；24 个延迟上的远/近相干性同时给出运行期延迟读数 `coh_lag_ms`。
+   - 用三通车上录音离线回放（`EchoCanceller` 原样运行，盒子 ART 上输出与桌面逐样点一致，每 8 ms 块约 0.9 ms CPU）：中档残留回声相关性降低 14.5–18 dB、强档 17–24 dB；无远端时近端语音变化 ≤ 1.3 dB，真实双讲中档约 −2 dB、强档约 −4 dB。
 
 ### 修改的上游文件（10 个）
 1. `AndroidAccessoryIo.java` — 适配 `msm8953` Android 9 `/dev/usb_accessory` 读写行为。
@@ -48,8 +51,17 @@
   - `sd-reverse.sh` 在脚本最前面判断 CarLife 模式并立即 `setprop sys.usb.configfs 2`，原厂 `iptables`/CPU 限频放到后台执行；USB ADB / CarPlay 模式流程不变；
   - `carlife-daemon.sh` 在 init 创建 gadget 功能后立即接管（开机 120 s 内守护 `sys.usb.configfs=2`，使 `init.msm.usb.configfs.rc:685` 永不绑定调试配置），用 Magisk busybox `uevent` 原生监听 `ACCESSORY=START`（Java `UEventWatch` 作后备），随即发布 CarLife MTP（`18d1:4ee1`，`ro.serialno`），`MdMain` 并行启动且重启不再触碰 USB；收到 AOA 后最多等 4 s 让 `MdMain` 持有 `/dev/usb_accessory` 再切换（车机重试窗口 10×500 ms）；
   - 实测（家中两次重启）：CarLife 设备在开机 10.5–10.9 s 出现，全程无高通调试配置、无断连；日志 `daemon.log` 开机阶段以 `boot up=<秒>` 记录时间线。
+  - Round 6：上车内核日志证实车机**确实**在开机后（盒子 13.2–19.7 s）按序列号匹配到盒子并连发 10 次 AOA 握手，但全部丢失：本内核的 `ACCESSORY=START` uevent 由延迟工作队列重新读取 USB 状态后发出，车机在 START 后 10–16 ms 即复位总线，开机时 CPU 繁忙导致工作项晚于复位执行，只看到 `mtp_start_work disconnected`，uevent 从未发出（开机后手动点击时恰好赶在复位前，所以能连上）。守护进程新增内核日志监听：`/dev/kmsg` 中 START 控制请求（`40.35 v0000 i0000 l0` / `mtp_ctrlrequest:1421`）是同步打印且读取前不会丢失；读取经 `cat` + FIFO 交给 busybox `awk`（busybox awk 直接读 `/dev/kmsg` 报 EINVAL），以写入内核日志的标记行区分新旧记录。用 Mac 上 libusb 模拟车机（START 后 2 ms 复位、每 0.7 s 重试 10 次）：旧守护进程 10 次全失败（与车上一致），新守护进程首次即在 START 后约 0.55 s 切到 accessory，会话结束后的下一轮同样有效。
 - `magisk-module/carlife-daemon.sh` — 管理 GPIO38 / `7000000.dwc3` configfs（`mtp.gs0` → `accessory.gs2`）、拉起 `MdMain` 与 `UEventWatch`、同步 A2DP 优先级、将 `sdsdk816` 调至 `renice -16` 防切 App 音频欠载、拉起悬浮球 `com.sd.ball`。
 - `magisk-module/system/etc/bluetooth/interop_database.conf`（Round 5 实验）— 原厂高通蓝牙兼容性名单 + 针对威飒车机（`88:bd:78` / `VENZA`）的 `INTEROP_DISABLE_CODEC_NEGOTIATION`（强制 CVSD）与 `INTEROP_DISABLE_SNIFF_DURING_SCO`，用于排查 QCOM-BTD 作为 HFP AG 时车机 12–24 ms 断开 eSCO 的问题（iPhone 直连车机通话正常，说明差异在盒子一侧）。
+  - Round 6：上车 HCI 日志只有 HFP 建链（`+BRSF: 2407`，已无编解码协商位，覆盖生效），**没有任何 SCO 建链尝试**。`call=bt` 按设计只是不采集通话、交给手机直连车机，盒子侧没有任何组件会经 `QCOM-BTD` 向车机发起通话音频，因此这组覆盖在本次测试中并未被用到。
+- 手机蓝牙连接配置（Round 6，`persist.tbox.carlife.bt.phone`）：`sdsdk816` 是盒子第二颗蓝牙芯片（`/dev/ttyHS0`，名称 `AutoKit-TBox`）的完整 goc 蓝牙栈，开机总是以电话 + 音乐 + AVRCP（+ iPhone iAP）回连上次的手机，占用手机的免提通道，车机便无法再连手机电话。它的命令集记录在 `/system/config.ini`（`AT#xx`，写入其命令 pty `/dev/goc_serial`，读端归 `com.carsyso.bluetooth`）。实测（iPhone）：`SE` 断开整台手机（没有只断电话的命令）、`DC<n>` 只连音乐（iPhone 保持 60 s 以上未补连电话，也不连 iAP）、`SC<n>` 在已有音乐连接上补连电话且不断开，`n` 为 `/data/goc/bt_conf.ini` 中 `addrN` 的 N+1。守护进程跟读 `sdsdk816` 的 logcat：`media` 模式下一旦电话连上（`MG3`）就 `SE` + `DC<n>`（每 10 分钟最多 3 次，通话中 `MG4/5/6` 不动作），从 `media` 切回 `all` 时 `SC<n>`（无连接时 `CC<addr>`）。开机实测：`sdsdk816` 回连后 40 ms 内释放电话，3.5 s 后音乐恢复。仅 CarLife 模式生效，CarPlay 模式不受影响。
+  - 仅音乐时的静音（Round 6c）：盒子蓝牙应用 `com.carsyso.bluetooth`（`/system/app/XQBluetooth`）在电话连接断开时发送 `AT#VA`（禁止蓝牙音乐），之后只在获得音乐焦点、或「A2DP 播放」时其蓝牙音乐界面可见 / 允许后台播放时才 `AT#VB`；仅音乐模式下它认为手机未连接，于是手机音乐流照常到达但被 `sdsdk816` 丢弃（日志 `A2dp mute!!!!`），表现为只有第一次有声。守护进程在仅音乐模式下，看到 `a2dp_player_start ... start succ` 或 `A2dp mute!!!!` 时补发 `AT#VB`（每 4 s 至多一次）。该应用界面仍会显示「蓝牙已断开」（其连接状态只看电话连接），不影响音乐经 CarLife 播放。
+- 开机更早出现 CarLife 设备（Round 6c）：4 次上车开机，盒子在 10.8–11.3 s 被枚举，车机均未发起 AOA；唯一一次车机主动发起时盒子在 10.63 s 被枚举——车机开机扫描恰在盒子 ~10.6–11 s 附近，属时序竞争。现改为：
+  - `magisk-module/post-fs-data.sh`（Magisk post-fs-data，~6.6–7.4 s）：CarLife 模式下（持久属性此时尚未加载，用 `magisk resetprop -p` 从存储读取）自建 `g1`、发布 CarLife MTP（`18d1:4ee1`，`ro.serialno`），后台守护至守护进程接管（`$RUN/usb.daemon`）：init 把 `sys.usb.configfs` 置 1 时立即改回 2 并设 `sys.usb.config=carlife`，恢复被 init「on boot」改写的序列号/厂商/产品字符串，必要时重绑；端口未连接时每 250 ms 重写一次 `ssusb/mode=peripheral`（早写入时 VBUS/充电检测未就绪，控制器不会开始会话）；
+  - `sd-reverse.sh` / 守护进程：CarLife 模式改用 `sys.usb.config=carlife` 与 `persist.vendor.usb.config=carlife`（不匹配任何 init 触发器；`none` 会在 init 把 `configfs` 置 1 时触发 `UDC none` 并删除 `configs/b.1/f*`）；
+  - 守护进程发现早期设备完好时不再重绑（`kept=early_gadget`），只重写字符串；开机后第一个内核日志监听器从缓冲区起点接收 START（车机可能在守护进程 ~9.3 s 启动前就已发起）。
+  - 家中实测：设备 8.1–8.3 s 被枚举（原 10.6–11.3 s），全程无断开；模拟车机在 8.4 s 起发 AOA，首个 START 被捕获，`MdMain` 就绪后 12.7 s 切换成功（车机 10 次重试窗口内）。
 - `magisk-module/system.prop` — 设置 `bluetooth.hfp.client=0`，配合 RRO 覆写包将 `QCOM-BTD` 切换为手机侧角色。
 - `magisk-module/service.d/wifi_adb.sh` — 开机自动在 TCP `5555` 启用 Wi-Fi ADB，与 CarLife / CarPlay 共存。
 

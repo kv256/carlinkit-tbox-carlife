@@ -66,6 +66,7 @@ bash scripts/pull_logs.sh
 | `persist.tbox.carlife.audio.navi` | `usb` / `bt` | 导航播报（含高德/百度/腾讯导航 UID 隔离）走 CarLife TTS (16kHz) 或蓝牙 |
 | `persist.tbox.carlife.audio.call` | `usb` / `bt` | 电话音频走 CarLife USB 或蓝牙 HFP SCO |
 | `persist.tbox.carlife.navi.pkgs` | 逗号分隔包名 | 额外需要路由到导航 TTS 通道的导航 App 包名 |
-| `persist.tbox.carlife.aec` | `off` / `1` / `2` / `3` / `linear` | `call=usb` 通话回声消除强度（默认 `2`；`1` 弱、`3` 强、`linear` 仅线性滤波），下一通电话生效；TboxUsbSwitch v1.5 可直接切换 |
+| `persist.tbox.carlife.aec` | `off` / `1` / `2` / `3` / `linear` | `call=usb` 通话回声消除强度（默认 `2`；`1` 弱、`3` 强、`linear` 仅线性滤波），下一通电话生效；TboxUsbSwitch 可直接切换 |
 | `persist.tbox.carlife.aec.delay` | `auto` / 毫秒数 | 回声延迟；默认自动估计（0–800 ms），仅调试时手动指定 |
-| `persist.tbox.carlife.aec.dump` | `0` / `1` | `1` = 每通电话把 `mic_raw` / `ref_aligned` / `aec_out` PCM（16 kHz 单声道）写入 `/cache/carlife/aec/<时间戳>/`，保留最近 3 通 |
+| `persist.tbox.carlife.aec.dump` | `0` / `1` | `1` = 每通电话把 `mic_raw` / `ref_aligned` / `aec_out` PCM（16 kHz 单声道）写入 `/cache/carlife/aec/<序号>-<时间戳>/`，保留最近 3 通 |
+| `persist.tbox.carlife.bt.phone` | `all` / `media` | 手机与盒子（`AutoKit-TBox`）的蓝牙连接：`all`（默认）= 音乐 + 电话；`media` = 仅音乐，电话由手机直连车机（车机侧设为只连电话）。即时生效，CarLife 模式下由守护进程按配置重连；TboxUsbSwitch v1.6「手机蓝牙」可切换 |

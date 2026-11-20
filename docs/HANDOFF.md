@@ -1,6 +1,6 @@
 # 工作交接单：`carlinkit-tbox-carlife`
 
-> 更新日期：2026-11-20（对应 Round 5 部署状态：`call=usb` 回声消除）
+> 更新日期：2026-11-20（对应 Round 6 部署状态：开机 AOA 内核日志监听 + 远端门控残余回声抑制）
 
 ## 1. 项目与环境概览
 
@@ -106,6 +106,36 @@
 - 根因与改动见 CUSTOMIZATIONS.md「开机自动启动 CarLife」。盒子现在开机约 10.5–10.9 s 以 CarLife 设备出现（原 19.2 s），且不再出现高通调试设备。
 - 验证：上次以盒子连接 CarLife 后熄火，再次启动车辆，观察 CarLife 是否自动弹出；之后 `bash scripts/pull_logs.sh`，查看 `daemon.log` 中 `boot up=` 时间线：`AOA_START_MATCHED` 出现在 ~11–15 s 且无人操作，即为赶上了车机开机扫描。若未赶上，说明车机扫描早于盒子能出现的最早时间（约 10 s）。
 - 回滚：`/data/adb/carlife/carlife-daemon.sh.round5.bak` 与 `/data/adb/carlife/sd-reverse.sh.round5.bak`（后者覆盖回 `/data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh`）后重启。
+
+### Round 6（第一次上车结果与修正，待上车验证）
+
+上车结果：蓝牙通话不通；`call=usb` 中/强档仍有回音；开机不自动启动 CarLife。分析与改动见 CUSTOMIZATIONS.md 各条「Round 6」。
+
+- 已部署（盒子已处于 CarLife 模式）：
+  - `/data/adb/carlife/carlife-daemon.sh` SHA-256 `ebd04951be3e9eb5ace9b33a1c55d10b31b0e2329ab3d3f8ea332892ea338908`（备份 `carlife-daemon.sh.round5b.bak`）；
+  - `/data/adb/carlife/carlife-md-api28.jar` SHA-256 `1d93576497754c7c51d3b954ed42b48d7c0f104ee8d0f555bdc9616688ecfaa0`（备份 `carlife-md-api28.jar.round5b.bak`）；
+  - `persist.tbox.carlife.aec=3`（用户上次设置）、`aec.dump=1` 保持；AEC 转储目录改为 `<序号>-<时间>`（盒子开机时钟为 2009 年，旧的按时间命名会误删新转储）。
+- 验证开机自动启动：以盒子连 CarLife 后熄火，再启动车辆。`daemon.log` 应出现 `AOA_START_MATCHED KMSG uptime_s=13.x`（无人操作）。
+- 验证回声：先用中档（TboxUsbSwitch“通话回声消除=中”），请对方说话、自己安静，再双方同时说话；`api28_aec` 日志新增 `gate_pct`（远端门控时间占比）、`gate_pass_pct`（门控期间判为近端语音的频点占比）、`coh_lag_ms`/`coh_max`（最相关延迟，正常应在 ~520 ms 附近，`coh_max` ≥ 0.2 才有意义）。
+- 蓝牙通话：结论见上；要让“手机连盒子、盒子用 QCOM-BTD 把通话送到车机”成立，需要在 `QCOM-BTD` 的 HFP AG 上模拟一路真实通话（`+CIEV` 通话指示 + `AT+CLCC` 列出通话；车机对虚拟通话 `AT+CLCC` 返回空列表的连接会在 12–24 ms 内断开 eSCO）并绕过音频 HAL 采集（`tinymix INTERNAL_BT_SCO` + `tinycap`/`tinyplay`），属于独立的新工作。目前请继续用 `call=usb`。
+- 回滚：`cp /data/adb/carlife/carlife-daemon.sh.round5b.bak /data/adb/carlife/carlife-daemon.sh`、`cp /data/adb/carlife/carlife-md-api28.jar.round5b.bak /data/adb/carlife/carlife-md-api28.jar` 后重启。
+
+### Round 6b（第二次上车结果与修正，待上车验证）
+
+- 上车结果：`call=usb` 回音已听不到（通话质量待继续测）；蓝牙经盒子通话仍不可用（预期）；开机自动启动未成功——本次车机在 11.0 s 识别盒子后**没有发起任何 AOA 握手**（与上次连发 10 次不同），属于车机侧"上次连接"记录不满足条件，盒子侧无从触发。iPhone 蓝牙通话 + 三星 CarLife 开机自动启动可共存（用户确认），因此不是 iPhone 直连车机导致。
+- 新增「手机蓝牙」连接配置（见 CUSTOMIZATIONS.md）：`persist.tbox.carlife.bt.phone=media` 时盒子只连手机音乐，电话留给车机；已在家用 iPhone 验证 `all ↔ media` 双向切换与开机生效。当前盒子已设为 `media`。
+- 已部署：`carlife-daemon.sh` SHA-256 `fa2cfd4b5c38f958c1f62d8bba37ebec6b8d3eb4126dc94862d408393f523482`（备份 `carlife-daemon.sh.round6.bak`）；TboxUsbSwitch **v1.6**（`versionCode=7`，新增「手机蓝牙 音乐+电话 / 仅音乐」）。
+- 上车验证：
+  1. 车机蓝牙里把 iPhone 设为只连电话；盒子保持「手机蓝牙=仅音乐」。启动后确认音乐经 CarLife 播放、电话由车机原车蓝牙接打。`daemon.log` 应有 `BT_PHONE_MEDIA_ONLY`。若车机首次没连上 iPhone 电话，在车机上手动点一次连接。
+  2. 开机自动启动（受控测试，同一趟内完成）：用盒子连上 CarLife（手动即可）→ 盒子不拔、CarLife 保持连接时熄火 → 等车机完全关闭约 1 分钟 → 再启动。`daemon.log` 中该次开机应出现 `AOA_START_MATCHED KMSG uptime_s≈13`；若车机依旧未发起握手（内核日志无 `mtp_ctrlrequest:1421`），则为车机侧条件问题。
+- 回滚：`cp /data/adb/carlife/carlife-daemon.sh.round6.bak /data/adb/carlife/carlife-daemon.sh` 后重启；或仅 `setprop persist.tbox.carlife.bt.phone all`。
+
+### Round 6c（第三次上车结果与修正，待上车验证）
+
+- 上车结果：音乐与电话已可分别连接；开机仍未自动拉起 CarLife（4 次开机车机均未发起 AOA）；仅音乐模式下盒子蓝牙音乐界面显示已断开且只有第一次有声。分析与改动见 CUSTOMIZATIONS.md「开机更早出现 CarLife 设备」「仅音乐时的静音」。
+- 已部署：`carlife-daemon.sh` SHA-256 `9a669ccb57c99e747093315b614e9c3e6059f124b396f37f99befecba42ed581`；Magisk 模块新增 `post-fs-data.sh`（SHA-256 `257a2ea74d831ad9d07a2ad5e29204a354b3b9e8cbd4f56ce5864ad03b8d900a`）与新版 `sd-reverse.sh`（`0fa1463ecd7f819eca15b2209bddc643800e06a37ccd40a5ca2112086a214184`）。备份：`/data/adb/carlife/carlife-daemon.sh.round6b.bak`、`/data/adb/carlife/sd-reverse.sh.round6b.bak`。
+- 上车验证：同一趟内用盒子连 CarLife → 保持连接熄火 → 等约 1 分钟 → 启动。`daemon.log` 应有 `EARLY_USB_ATTACHED`（~8 s）与 `AOA_START_MATCHED KMSG uptime_s≈10–13`（无人操作）。仅音乐模式下放歌、暂停、再放，确认一直有声，日志有 `BT_PHONE_MUSIC_UNMUTED`。
+- 回滚：删除 `/data/adb/modules/tbox_carlife/post-fs-data.sh`，并把两个 `.round6b.bak` 拷回（`sd-reverse.sh` 拷到 `/data/adb/modules/tbox_carlife/system/bin/`）后重启。
 
 ## 6. 交接注意事项与红线
 
