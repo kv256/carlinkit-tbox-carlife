@@ -80,6 +80,7 @@ public final class TechBtMusicClient {
 
     // Authoritative A2DP state from VdInputBridge (-1=unknown, 0=disconnected, 1=paused, 2=playing)
     private int bridgeBtState = VdInputBridge.BT_STATE_UNKNOWN;
+    private boolean hasBridgeMetadata = false;
     private String lastTrackKey = "";
 
     private final MediaController.Callback controllerCallback = new MediaController.Callback() {
@@ -167,7 +168,7 @@ public final class TechBtMusicClient {
         public void run() {
             if (!started) return;
             pollBridgeBtState();
-            handler.postDelayed(this, 1200L);
+            handler.postDelayed(this, 500L);
         }
     };
 
@@ -182,7 +183,7 @@ public final class TechBtMusicClient {
         pollBridgeBtState();
         connectMediaBrowser();
         bindMainService();
-        handler.postDelayed(btStatePoller, 1200L);
+        handler.postDelayed(btStatePoller, 500L);
     }
 
     public void stop() {
@@ -264,15 +265,18 @@ public final class TechBtMusicClient {
             snap.a2dpConnected = true;
             snap.playing = newPlaying;
 
-            if (!TextUtils.isEmpty(bTitle) && !bTitle.equals(snap.title)) {
-                snap.title = bTitle;
-                snap.artist = bArtist;
-                snap.album = bAlbum;
-                lastTrackKey = bTitle + "|" + bArtist;
-                changed = true;
-            } else if (TextUtils.isEmpty(snap.artist) && !TextUtils.isEmpty(bArtist)) {
-                snap.artist = bArtist;
-                changed = true;
+            if (!TextUtils.isEmpty(bTitle)) {
+                hasBridgeMetadata = true;
+                String newKey = bTitle + "|" + bArtist;
+                boolean trackChanged = !bTitle.equals(snap.title) || !bArtist.equals(snap.artist);
+                if (trackChanged) {
+                    snap.title = bTitle;
+                    snap.artist = bArtist;
+                    snap.album = bAlbum;
+                    snap.albumArt = null;
+                    lastTrackKey = newKey;
+                    changed = true;
+                }
             }
             if (bDurMs > 0 && bDurMs != snap.durationMs) {
                 snap.durationMs = bDurMs;
@@ -287,8 +291,10 @@ public final class TechBtMusicClient {
 
             if (prev <= VdInputBridge.BT_STATE_DISCONNECTED) {
                 snap.lastUpdateMs = System.currentTimeMillis();
-                updateFromBtController();
-                inquireMediaInfo();
+                if (!hasBridgeMetadata) {
+                    updateFromBtController();
+                    inquireMediaInfo();
+                }
                 notifyListener();
             } else if (changed) {
                 snap.lastUpdateMs = System.currentTimeMillis();
@@ -298,6 +304,7 @@ public final class TechBtMusicClient {
     }
 
     private void clearSnapshot() {
+        hasBridgeMetadata = false;
         snap.a2dpConnected = false;
         snap.playing = false;
         snap.title = "";
@@ -399,6 +406,25 @@ public final class TechBtMusicClient {
         } else {
             snap.a2dpConnected = true;
             snap.playing = (bridgeBtState == VdInputBridge.BT_STATE_PLAYING);
+        }
+
+        // When VdInputBridge is feeding authoritative live [MI]/[MT] metadata straight from
+        // the Bluetooth serial stream, never let stale BtMediaBrowserService metadata overwrite
+        // title/artist/album/duration (prevents old <-> new title ping-pong after track skip!).
+        if (hasBridgeMetadata) {
+            boolean changed = false;
+            if (mm != null && !TextUtils.isEmpty(title) && title.equals(snap.title)) {
+                Bitmap art = extractLocalArtwork(mm);
+                if (art != null && art != snap.albumArt) {
+                    snap.albumArt = art;
+                    changed = true;
+                }
+            }
+            if (changed) {
+                snap.lastUpdateMs = System.currentTimeMillis();
+                notifyListener();
+            }
+            return;
         }
 
         String trackKey = title + "|" + artist;
@@ -539,7 +565,7 @@ public final class TechBtMusicClient {
                 if (reply != null) reply.writeNoException();
                 Log.i(TAG, "MainService media_report: mediaType=" + mediaType + " deviceType=" + deviceType
                     + " info=" + (info != null ? java.util.Arrays.toString(info) : "null"));
-                if (bridgeBtState == VdInputBridge.BT_STATE_DISCONNECTED) {
+                if (bridgeBtState == VdInputBridge.BT_STATE_DISCONNECTED || hasBridgeMetadata) {
                     return true;
                 }
                 if (deviceType == 7 && info != null && info.length > 0 && snap.a2dpConnected) {

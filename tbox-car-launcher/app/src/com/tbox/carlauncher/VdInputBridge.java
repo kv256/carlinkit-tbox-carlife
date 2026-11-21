@@ -224,7 +224,7 @@ public final class VdInputBridge {
         // Parse track metadata directly from [MI<title>\uFFFD<artist>\uFFFD<album>\uFFFD<dur>...]
         int miStart = line.indexOf("[MI");
         if (miStart >= 0) {
-            int miEnd = line.indexOf(']', miStart + 3);
+            int miEnd = line.lastIndexOf(']');
             if (miEnd > miStart + 3) {
                 String payload = line.substring(miStart + 3, miEnd);
                 String[] parts = payload.split("\ufffd", -1);
@@ -237,10 +237,19 @@ public final class VdInputBridge {
                         try { dur = Long.parseLong(parts[3].trim()); } catch (Throwable ignored) {}
                     }
                     if (!title.isEmpty()) {
+                        boolean changed = !title.equals(btTitle) || !artist.equals(btArtist);
                         btTitle = title;
                         btArtist = !artist.isEmpty() ? artist : album;
                         btAlbum = album;
-                        if (dur > 0) btDurMs = dur;
+                        if (dur > 0) {
+                            btDurMs = dur;
+                        } else if (changed) {
+                            btDurMs = 0L;
+                        }
+                        if (changed) {
+                            btPosMs = 0L;
+                            Log.i(TAG, "BT track changed: title=" + btTitle + " artist=" + btArtist + " dur=" + btDurMs);
+                        }
                         btLastEventMs = System.currentTimeMillis();
                     }
                 }
