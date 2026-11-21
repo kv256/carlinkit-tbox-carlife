@@ -4,11 +4,14 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.MediaMetadata;
 import android.media.browse.MediaBrowser;
 import android.media.session.MediaController;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
+import android.net.Uri;
 import android.os.Binder;
 import android.os.Handler;
 import android.os.IBinder;
@@ -51,6 +54,7 @@ public final class TechBtMusicClient {
         public String title = "";
         public String artist = "";
         public String album = "";
+        public Bitmap albumArt;
         public long positionMs;
         public long durationMs;
         public long lastUpdateMs;
@@ -299,6 +303,7 @@ public final class TechBtMusicClient {
         snap.title = "";
         snap.artist = "";
         snap.album = "";
+        snap.albumArt = null;
         snap.positionMs = 0L;
         snap.durationMs = 0L;
         snap.lastUpdateMs = System.currentTimeMillis();
@@ -416,6 +421,13 @@ public final class TechBtMusicClient {
             snap.durationMs = dur;
         } else if (trackChanged) {
             snap.durationMs = 0L;
+        }
+
+        Bitmap art = extractLocalArtwork(mm);
+        if (art != null) {
+            snap.albumArt = art;
+        } else if (trackChanged) {
+            snap.albumArt = null;
         }
 
         if (pb != null && pb.getPosition() >= 0) {
@@ -563,6 +575,32 @@ public final class TechBtMusicClient {
                 }
             });
         }
+    }
+
+    private Bitmap extractLocalArtwork(MediaMetadata mm) {
+        if (mm == null) return null;
+        Bitmap art = mm.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
+        if (art == null) art = mm.getBitmap(MediaMetadata.METADATA_KEY_ART);
+        if (art == null) art = mm.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON);
+        if (art != null) return art;
+        String uriStr = mm.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI);
+        if (TextUtils.isEmpty(uriStr)) uriStr = mm.getString(MediaMetadata.METADATA_KEY_ART_URI);
+        if (TextUtils.isEmpty(uriStr)) uriStr = mm.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI);
+        if (!TextUtils.isEmpty(uriStr)) {
+            Uri uri = Uri.parse(uriStr);
+            String scheme = uri.getScheme();
+            if ("content".equals(scheme) || "file".equals(scheme)) {
+                java.io.InputStream is = null;
+                try {
+                    is = ctx.getContentResolver().openInputStream(uri);
+                    if (is != null) return BitmapFactory.decodeStream(is);
+                } catch (Throwable ignored) {
+                } finally {
+                    if (is != null) try { is.close(); } catch (Throwable ignored) {}
+                }
+            }
+        }
+        return null;
     }
 
     private static String cleanStr(String s) {
