@@ -3,12 +3,17 @@ package com.tbox.carlauncher;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
 import android.graphics.RectF;
+import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -21,7 +26,8 @@ import android.widget.TextView;
 /**
  * Bottom-Right 512x345 CarPlay / Apple Music-style Media Card.
  * Dynamically tints its background from album art, displays track/artist/source badge,
- * smoothly interpolates playback progress, and offers large ergonomic transport controls.
+ * smoothly scrolls long titles at sub-pixel 60fps without jitter, interpolates playback
+ * progress, and offers large ergonomic transport controls.
  */
 public class MusicWidgetView extends LinearLayout {
     public interface Callbacks {
@@ -38,7 +44,7 @@ public class MusicWidgetView extends LinearLayout {
     private final VinylPlaceholderView vinylPlaceholder;
     private final TextView tvSource;
     private final View liveDot;
-    private final TextView tvTitle;
+    private final SmoothMarqueeView tvTitle;
     private final TextView tvArtist;
     private final NavWidgetView.ProgressStripView progressStrip;
     private final TextView tvElapsed;
@@ -48,6 +54,14 @@ public class MusicWidgetView extends LinearLayout {
     private MediaHub.MediaState currentState;
     private Bitmap lastArtRef;
     private int currentBgTint = UiUtil.CARD_BG_TOP;
+
+    // Diff caches so 1-second progress updates never trigger spurious setText()/requestLayout()
+    private String lastSource = null;
+    private String lastTitle = null;
+    private String lastArtist = null;
+    private Boolean lastPlayingDot = null;
+    private String lastElapsed = null;
+    private String lastDuration = null;
 
     private final Runnable progressTicker = new Runnable() {
         @Override
@@ -120,15 +134,8 @@ public class MusicWidgetView extends LinearLayout {
 
         infoCol.addView(sourceRow, new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT));
 
-        tvTitle = new TextView(context);
+        tvTitle = new SmoothMarqueeView(context, 26f, 0xFFFFFFFF, Typeface.create("sans-serif-medium", Typeface.BOLD));
         tvTitle.setText("等待播放音乐");
-        tvTitle.setTextColor(0xFFFFFFFF);
-        tvTitle.setTextSize(TypedValue.COMPLEX_UNIT_PX, 26f);
-        tvTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
-        tvTitle.setSingleLine(true);
-        tvTitle.setEllipsize(TextUtils.TruncateAt.MARQUEE);
-        tvTitle.setMarqueeRepeatLimit(-1);
-        tvTitle.setSelected(true);
         LayoutParams titleLp = new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
         titleLp.topMargin = 10;
         infoCol.addView(tvTitle, titleLp);
@@ -217,18 +224,37 @@ public class MusicWidgetView extends LinearLayout {
         handler.removeCallbacks(progressTicker);
         if (s == null) return;
 
-        tvSource.setText(TextUtils.isEmpty(s.sourceLabel) ? "蓝牙音乐" : s.sourceLabel);
-        liveDot.setBackground(UiUtil.solidRounded(s.playing ? UiUtil.ACCENT_GREEN : 0xFF64748B, 6f, 0, 0));
+        String newSource = TextUtils.isEmpty(s.sourceLabel) ? "蓝牙音乐" : s.sourceLabel;
+        if (!newSource.equals(lastSource)) {
+            lastSource = newSource;
+            tvSource.setText(newSource);
+        }
 
+        if (lastPlayingDot == null || lastPlayingDot.booleanValue() != s.playing) {
+            lastPlayingDot = s.playing;
+            liveDot.setBackground(UiUtil.solidRounded(s.playing ? UiUtil.ACCENT_GREEN : 0xFF64748B, 6f, 0, 0));
+        }
+
+        final String newTitle;
+        final String newArtist;
         if (!TextUtils.isEmpty(s.title)) {
-            tvTitle.setText(s.title);
-            tvArtist.setText(TextUtils.isEmpty(s.artist) ? s.sourceLabel : s.artist);
+            newTitle = s.title;
+            newArtist = TextUtils.isEmpty(s.artist) ? newSource : s.artist;
         } else if (s.playing) {
-            tvTitle.setText("正在播放");
-            tvArtist.setText(s.sourceLabel);
+            newTitle = "正在播放";
+            newArtist = newSource;
         } else {
-            tvTitle.setText("等待播放音乐");
-            tvArtist.setText("连接手机蓝牙音频即可直接控制");
+            newTitle = "等待播放音乐";
+            newArtist = "连接手机蓝牙音频即可直接控制";
+        }
+
+        if (!newTitle.equals(lastTitle)) {
+            lastTitle = newTitle;
+            tvTitle.setText(newTitle);
+        }
+        if (!newArtist.equals(lastArtist)) {
+            lastArtist = newArtist;
+            tvArtist.setText(newArtist);
         }
 
         playPauseIcon.setKind(s.playing ? TransportIconView.PAUSE : TransportIconView.PLAY);
@@ -260,19 +286,29 @@ public class MusicWidgetView extends LinearLayout {
         if (currentState == null || !currentState.hasSession || currentState.durationMs <= 0L) {
             boolean activePlaying = currentState != null && currentState.hasSession && currentState.playing;
             progressStrip.setProgress(activePlaying ? 0.35f : 0f);
-            tvElapsed.setText(activePlaying ? "正在播放" : "0:00");
-            tvDuration.setText(activePlaying ? "LIVE" : "--:--");
+            setTimeTexts(activePlaying ? "正在播放" : "0:00", activePlaying ? "LIVE" : "--:--");
             return;
         }
         long pos = currentState.estimatedPositionMs();
         long dur = currentState.durationMs;
         progressStrip.setProgress((float) pos / (float) dur);
-        tvElapsed.setText(UiUtil.formatMs(pos));
-        tvDuration.setText(UiUtil.formatMs(dur));
+        setTimeTexts(UiUtil.formatMs(pos), UiUtil.formatMs(dur));
+    }
+
+    private void setTimeTexts(String elapsed, String duration) {
+        if (!elapsed.equals(lastElapsed)) {
+            lastElapsed = elapsed;
+            tvElapsed.setText(elapsed);
+        }
+        if (!duration.equals(lastDuration)) {
+            lastDuration = duration;
+            tvDuration.setText(duration);
+        }
     }
 
     public void release() {
         handler.removeCallbacks(progressTicker);
+        tvTitle.stopScrolling();
     }
 
     private View makeCtrlButton(Context ctx, View icon, int w, int h, int bgColor, float radius, OnClickListener click) {
@@ -285,6 +321,161 @@ public class MusicWidgetView extends LinearLayout {
         box.setOnClickListener(click);
         UiUtil.addPressScale(box);
         return box;
+    }
+
+    /**
+     * Silky sub-pixel 60fps continuous marquee view (Apple CarPlay style):
+     * - Static left-aligned when text fits cleanly.
+     * - Smooth constant-velocity dual-copy loop with soft edge fade when text overflows.
+     * - Immune to sibling layout/progress updates; only resets offset when text actually changes.
+     */
+    private static final class SmoothMarqueeView extends View {
+        private static final float SPEED_PX_PER_SEC = 40f;
+        private static final float LOOP_GAP_PX = 72f;
+        private static final float FADE_WIDTH_PX = 24f;
+        private static final long INITIAL_HOLD_MS = 1400L;
+
+        private final Paint textPaint = new Paint(
+            Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG | Paint.LINEAR_TEXT_FLAG
+        );
+        private final Paint fadePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private String text = "";
+        private float textWidth = 0f;
+        private float offsetPx = 0f;
+        private long holdUntilMs = 0L;
+        private long lastFrameMs = 0L;
+        private boolean scrolling = false;
+        private int lastFadeW = -1;
+        private LinearGradient leftFadeShader;
+        private LinearGradient rightFadeShader;
+
+        SmoothMarqueeView(Context ctx, float textSizePx, int color, Typeface tf) {
+            super(ctx);
+            textPaint.setColor(color);
+            textPaint.setTextSize(textSizePx);
+            if (tf != null) textPaint.setTypeface(tf);
+            fadePaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_OUT));
+        }
+
+        void setText(String newText) {
+            String t = newText == null ? "" : newText;
+            if (t.equals(this.text)) return;
+            this.text = t;
+            this.textWidth = textPaint.measureText(t);
+            resetScroll();
+            invalidate();
+        }
+
+        void stopScrolling() {
+            scrolling = false;
+        }
+
+        private void resetScroll() {
+            offsetPx = 0f;
+            long now = SystemClock.uptimeMillis();
+            holdUntilMs = now + INITIAL_HOLD_MS;
+            lastFrameMs = now;
+            updateScrollNeeded();
+        }
+
+        private void updateScrollNeeded() {
+            int w = getWidth();
+            scrolling = isAttachedToWindow() && w > 0 && textWidth > w + 1f;
+            if (scrolling) {
+                postInvalidateOnAnimation();
+            }
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            Paint.FontMetrics fm = textPaint.getFontMetrics();
+            int h = (int) Math.ceil(fm.bottom - fm.top) + 4;
+            int w = MeasureSpec.getSize(widthMeasureSpec);
+            setMeasuredDimension(w, resolveSize(h, heightMeasureSpec));
+        }
+
+        @Override
+        protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+            super.onSizeChanged(w, h, oldw, oldh);
+            if (w != oldw) {
+                lastFadeW = -1;
+                updateScrollNeeded();
+            }
+        }
+
+        @Override
+        protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            resetScroll();
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            super.onDetachedFromWindow();
+            scrolling = false;
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            int w = getWidth();
+            int h = getHeight();
+            if (w <= 0 || h <= 0 || text.isEmpty()) return;
+
+            Paint.FontMetrics fm = textPaint.getFontMetrics();
+            float baseline = (h - (fm.descent + fm.ascent)) * 0.5f;
+
+            if (textWidth <= w + 1f) {
+                scrolling = false;
+                offsetPx = 0f;
+                c.drawText(text, 0f, baseline, textPaint);
+                return;
+            }
+
+            long now = SystemClock.uptimeMillis();
+            if (lastFrameMs == 0L) lastFrameMs = now;
+            if (now >= holdUntilMs) {
+                long dt = now - lastFrameMs;
+                if (dt > 50L) dt = 50L; // clamp frame hiccups so text never jumps
+                if (dt > 0L) {
+                    float cycle = textWidth + LOOP_GAP_PX;
+                    offsetPx += (SPEED_PX_PER_SEC * dt) / 1000f;
+                    if (offsetPx >= cycle) {
+                        offsetPx -= cycle;
+                    }
+                }
+            }
+            lastFrameMs = now;
+
+            if (lastFadeW != w) {
+                lastFadeW = w;
+                leftFadeShader = new LinearGradient(0f, 0f, FADE_WIDTH_PX, 0f,
+                    0xFF000000, 0x00000000, Shader.TileMode.CLAMP);
+                rightFadeShader = new LinearGradient(w - FADE_WIDTH_PX, 0f, w, 0f,
+                    0x00000000, 0xFF000000, Shader.TileMode.CLAMP);
+            }
+
+            int save = c.saveLayer(0f, 0f, w, h, null);
+            float cycle = textWidth + LOOP_GAP_PX;
+            float x1 = -offsetPx;
+            c.drawText(text, x1, baseline, textPaint);
+            float x2 = x1 + cycle;
+            if (x2 < w) {
+                c.drawText(text, x2, baseline, textPaint);
+            }
+
+            // Soft left fade once scrolled past 0, soft right fade always while overflowing
+            if (offsetPx > 1f) {
+                fadePaint.setShader(leftFadeShader);
+                c.drawRect(0f, 0f, FADE_WIDTH_PX, h, fadePaint);
+            }
+            fadePaint.setShader(rightFadeShader);
+            c.drawRect(w - FADE_WIDTH_PX, 0f, w, h, fadePaint);
+            c.restoreToCount(save);
+
+            if (scrolling) {
+                postInvalidateOnAnimation();
+            }
+        }
     }
 
     private static final class VinylPlaceholderView extends View {
