@@ -106,17 +106,22 @@ if [ "$DO_LAUNCHER" = "1" ]; then
   "$ADB" -s "$SERIAL" push "$LAPK" /data/local/tmp/TboxCarLauncher.apk
   "$ADB" -s "$SERIAL" push "$REPO/tbox-car-launcher/privapp-permissions-tboxcarlauncher.xml" /data/local/tmp/privapp-permissions-tboxcarlauncher.xml
   "$ADB" -s "$SERIAL" push "$REPO/magisk-module/service.d/tbox_vd_input.sh" /data/local/tmp/tbox_vd_input.sh
+  "$ADB" -s "$SERIAL" push "$REPO/magisk-module/system.prop" /data/local/tmp/tbox_system.prop
   "$ADB" -s "$SERIAL" shell "su -c 'set -e
     mkdir -p /data/adb/modules/tbox_carlife/system/priv-app/TboxCarLauncher /data/adb/modules/tbox_carlife/system/etc/permissions /data/adb/service.d
     cp /data/local/tmp/TboxCarLauncher.apk /data/adb/modules/tbox_carlife/system/priv-app/TboxCarLauncher/TboxCarLauncher.apk
     cp /data/local/tmp/privapp-permissions-tboxcarlauncher.xml /data/adb/modules/tbox_carlife/system/etc/permissions/privapp-permissions-tboxcarlauncher.xml
     cp /data/local/tmp/tbox_vd_input.sh /data/adb/service.d/tbox_vd_input.sh
+    cp /data/local/tmp/tbox_system.prop /data/adb/modules/tbox_carlife/system.prop
     chmod 0755 /data/adb/modules/tbox_carlife/system/priv-app /data/adb/modules/tbox_carlife/system/priv-app/TboxCarLauncher /data/adb/modules/tbox_carlife/system/etc /data/adb/modules/tbox_carlife/system/etc/permissions /data/adb/service.d/tbox_vd_input.sh
-    chmod 0644 /data/adb/modules/tbox_carlife/system/priv-app/TboxCarLauncher/TboxCarLauncher.apk /data/adb/modules/tbox_carlife/system/etc/permissions/privapp-permissions-tboxcarlauncher.xml
-    chown -R root:root /data/adb/modules/tbox_carlife/system/priv-app /data/adb/modules/tbox_carlife/system/etc /data/adb/service.d/tbox_vd_input.sh
+    chmod 0644 /data/adb/modules/tbox_carlife/system/priv-app/TboxCarLauncher/TboxCarLauncher.apk /data/adb/modules/tbox_carlife/system/etc/permissions/privapp-permissions-tboxcarlauncher.xml /data/adb/modules/tbox_carlife/system.prop
+    chown -R root:root /data/adb/modules/tbox_carlife/system/priv-app /data/adb/modules/tbox_carlife/system/etc /data/adb/modules/tbox_carlife/system.prop /data/adb/service.d/tbox_vd_input.sh
+    setprop persist.suding.hasnavibar false || true
     settings put global force_resizable_activities 1
     settings put global hidden_api_policy_p_apps 1
     settings put global hidden_api_policy_pre_p_apps 1
+    cmd package set-home-activity com.tbox.carlauncher/.LauncherActivity || true
+    pm disable-user --user 0 com.android.launcher3 || true
     CUR_NLS=\$(settings get secure enabled_notification_listeners)
     NLS_ENTRY=\"com.tbox.carlauncher/com.tbox.carlauncher.MediaNotificationListener\"
     case \"\$CUR_NLS\" in
@@ -127,7 +132,7 @@ if [ "$DO_LAUNCHER" = "1" ]; then
     if pm path com.tbox.carlauncher >/dev/null 2>&1; then
       pm install -r /data/local/tmp/TboxCarLauncher.apk
     fi
-    rm -f /data/local/tmp/TboxCarLauncher.apk /data/local/tmp/privapp-permissions-tboxcarlauncher.xml /data/local/tmp/tbox_vd_input.sh
+    rm -f /data/local/tmp/TboxCarLauncher.apk /data/local/tmp/privapp-permissions-tboxcarlauncher.xml /data/local/tmp/tbox_vd_input.sh /data/local/tmp/tbox_system.prop
   '"
   echo "TboxCarLauncher deployed. First-time priv-app mount requires one reboot; subsequent updates apply immediately."
 fi

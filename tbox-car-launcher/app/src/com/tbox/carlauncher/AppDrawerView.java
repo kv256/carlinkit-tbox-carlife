@@ -5,6 +5,9 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.text.TextUtils;
@@ -25,7 +28,7 @@ import java.util.Set;
 
 /**
  * CarPlay-style paginated 5x2 App Drawer displayed inside the 1248x702 16:9 center viewport.
- * Supports horizontal swipe AND tactile page arrows for effortless operation while driving.
+ * Uses clean borderless surfaces and crisp vector chevron icons for pagination.
  */
 public class AppDrawerView extends LinearLayout {
     public static final class AppEntry {
@@ -55,8 +58,8 @@ public class AppDrawerView extends LinearLayout {
     private final LinearLayout gridHost;
     private final LinearLayout dotsRow;
     private final TextView tvPageInfo;
-    private final TextView btnPrevPage;
-    private final TextView btnNextPage;
+    private final View btnPrevPage;
+    private final View btnNextPage;
 
     private int currentPage = 0;
     private float downX = 0f;
@@ -65,8 +68,8 @@ public class AppDrawerView extends LinearLayout {
         super(context);
         this.callbacks = cb;
         setOrientation(VERTICAL);
-        setPadding(34, 24, 34, 22);
-        setBackground(UiUtil.cardDrawable(0xFF121824, 0xFF0B0F17, 22f, UiUtil.CARD_BORDER, 2));
+        setPadding(34, 24, 34, 20);
+        setBackground(UiUtil.cardDrawable(0xFF121722, 0xFF0B0F17, 20f, UiUtil.CARD_BORDER, 1));
 
         // Top header bar
         LinearLayout header = new LinearLayout(context);
@@ -88,7 +91,7 @@ public class AppDrawerView extends LinearLayout {
         header.addView(tvPageInfo, pInfoLp);
 
         TextView tvHint = new TextView(context);
-        tvHint.setText("长按图标可固定到左侧 Dock");
+        tvHint.setText("长按图标可固定 Dock 或卸载");
         tvHint.setTextColor(UiUtil.TEXT_MUTED);
         tvHint.setTextSize(TypedValue.COMPLEX_UNIT_PX, 17f);
         LayoutParams hintLp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
@@ -100,7 +103,7 @@ public class AppDrawerView extends LinearLayout {
         btnSettings.setTextColor(0xFFE2E8F0);
         btnSettings.setTextSize(TypedValue.COMPLEX_UNIT_PX, 19f);
         btnSettings.setPadding(22, 10, 22, 10);
-        btnSettings.setBackground(UiUtil.solidRounded(0x1EFFFFFF, 16f, 0x28FFFFFF, 1));
+        btnSettings.setBackground(UiUtil.solidRounded(0x16FFFFFF, 16f, 0, 0));
         btnSettings.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -121,12 +124,12 @@ public class AppDrawerView extends LinearLayout {
         gridLp.bottomMargin = 12;
         addView(gridHost, gridLp);
 
-        // Bottom pagination bar
+        // Bottom pagination bar with pure vector chevron icons (no text)
         LinearLayout pager = new LinearLayout(context);
         pager.setOrientation(HORIZONTAL);
         pager.setGravity(Gravity.CENTER);
 
-        btnPrevPage = makePageBtn(context, "‹  上一页", new OnClickListener() {
+        btnPrevPage = makeChevronBtn(context, true, new OnClickListener() {
             @Override
             public void onClick(View v) {
                 goToPage(currentPage - 1);
@@ -142,7 +145,7 @@ public class AppDrawerView extends LinearLayout {
         dotsLp.rightMargin = 28;
         pager.addView(dotsRow, dotsLp);
 
-        btnNextPage = makePageBtn(context, "下一页  ›", new OnClickListener() {
+        btnNextPage = makeChevronBtn(context, false, new OnClickListener() {
             @Override
             public void onClick(View v) {
                 goToPage(currentPage + 1);
@@ -193,7 +196,6 @@ public class AppDrawerView extends LinearLayout {
             apps.add(new AppEntry(pkg, label, bmp));
         }
 
-        // Priority sort: navigation / music / video / switch tools first, then alphabetical
         Collections.sort(apps, new Comparator<AppEntry>() {
             @Override
             public int compare(AppEntry a, AppEntry b) {
@@ -204,7 +206,7 @@ public class AppDrawerView extends LinearLayout {
             }
         });
 
-        currentPage = 0;
+        if (currentPage >= pageCount()) currentPage = Math.max(0, pageCount() - 1);
         renderPage();
     }
 
@@ -254,15 +256,15 @@ public class AppDrawerView extends LinearLayout {
         for (int i = 0; i < totalPages; i++) {
             View dot = new View(ctx);
             boolean active = (i == currentPage);
-            dot.setBackground(UiUtil.solidRounded(active ? UiUtil.ACCENT_BLUE : 0x44FFFFFF, 6f, 0, 0));
-            LayoutParams dlp = new LayoutParams(active ? 26 : 10, 10);
+            dot.setBackground(UiUtil.solidRounded(active ? UiUtil.ACCENT_BLUE : 0x38FFFFFF, 5f, 0, 0));
+            LayoutParams dlp = new LayoutParams(active ? 24 : 9, 9);
             dlp.leftMargin = 5;
             dlp.rightMargin = 5;
             dotsRow.addView(dot, dlp);
         }
 
-        btnPrevPage.setAlpha(currentPage > 0 ? 1f : 0.30f);
-        btnNextPage.setAlpha(currentPage < totalPages - 1 ? 1f : 0.30f);
+        btnPrevPage.setAlpha(currentPage > 0 ? 1f : 0.25f);
+        btnNextPage.setAlpha(currentPage < totalPages - 1 ? 1f : 0.25f);
     }
 
     private View makeAppTile(Context ctx, final AppEntry app) {
@@ -272,7 +274,7 @@ public class AppDrawerView extends LinearLayout {
         tile.setPadding(12, 10, 12, 10);
 
         FrameLayout iconWrap = new FrameLayout(ctx);
-        iconWrap.setBackground(UiUtil.solidRounded(0x16FFFFFF, 28f, 0x1FFFFFFF, 1));
+        iconWrap.setBackground(UiUtil.solidRounded(0x10FFFFFF, 28f, 0, 0));
         iconWrap.setPadding(6, 6, 6, 6);
         ImageView iv = new ImageView(ctx);
         iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -309,16 +311,54 @@ public class AppDrawerView extends LinearLayout {
         return tile;
     }
 
-    private TextView makePageBtn(Context ctx, String text, OnClickListener click) {
-        TextView tv = new TextView(ctx);
-        tv.setText(text);
-        tv.setTextColor(0xFFE2E8F0);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_PX, 19f);
-        tv.setPadding(24, 10, 24, 10);
-        tv.setBackground(UiUtil.solidRounded(0x18FFFFFF, 16f, 0x22FFFFFF, 1));
-        tv.setOnClickListener(click);
-        UiUtil.addPressScale(tv);
-        return tv;
+    private View makeChevronBtn(Context ctx, boolean left, OnClickListener click) {
+        FrameLayout box = new FrameLayout(ctx);
+        box.setBackground(UiUtil.solidRounded(0x14FFFFFF, 16f, 0, 0));
+        box.setLayoutParams(new LayoutParams(64, 46));
+        box.setPadding(18, 10, 18, 10);
+        box.addView(new ChevronIconView(ctx, left, 0xFFE2E8F0),
+            new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+        box.setOnClickListener(click);
+        UiUtil.addPressScale(box);
+        return box;
+    }
+
+    private static final class ChevronIconView extends View {
+        private final boolean left;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path path = new Path();
+
+        ChevronIconView(Context ctx, boolean left, int color) {
+            super(ctx);
+            this.left = left;
+            paint.setColor(color);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeJoin(Paint.Join.ROUND);
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float w = getWidth();
+            float h = getHeight();
+            float s = Math.min(w, h);
+            if (s <= 0) return;
+            c.save();
+            c.translate((w - s) * 0.5f, (h - s) * 0.5f);
+            paint.setStrokeWidth(s * 0.14f);
+            path.reset();
+            if (left) {
+                path.moveTo(s * 0.66f, s * 0.16f);
+                path.lineTo(s * 0.30f, s * 0.50f);
+                path.lineTo(s * 0.66f, s * 0.84f);
+            } else {
+                path.moveTo(s * 0.34f, s * 0.16f);
+                path.lineTo(s * 0.70f, s * 0.50f);
+                path.lineTo(s * 0.34f, s * 0.84f);
+            }
+            c.drawPath(path, paint);
+            c.restore();
+        }
     }
 
     private static int priorityOf(String pkg) {

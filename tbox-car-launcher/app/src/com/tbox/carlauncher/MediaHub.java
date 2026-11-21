@@ -21,11 +21,12 @@ import java.util.List;
 
 /**
  * Unified media metadata & transport hub:
- * 1) Privileged MediaSessionManager (captures com.carsyso.bluetooth A2DP/AVRCP + NetEase/Kuwo/StreamMusic/etc.)
- * 2) MediaNotificationListener fallback (captures com.carsyso.bluetooth track notifications even when HFP is off)
- * 3) AudioManager.dispatchMediaKeyEvent fallback for Prev / Play-Pause / Next
+ * 1) Local Tbox apps via privileged MediaSessionManager (NetEase, Kuwo, StreamMusic, Bilibili, etc.)
+ * 2) Phone Bluetooth music & video via direct TechBtMusicClient AIDL to com.carsyso.bluetooth/TechBTService
+ *    (works even when ONLY Bluetooth media A2DP/AVRCP is connected and HFP is disconnected!)
+ * 3) MediaNotificationListener + AudioManager media-key fallbacks
  */
-public final class MediaHub implements MediaNotificationListener.Callback {
+public final class MediaHub implements MediaNotificationListener.Callback, TechBtMusicClient.Listener {
     private static final String TAG = "TboxMediaHub";
 
     public static final class MediaState {
@@ -35,6 +36,8 @@ public final class MediaHub implements MediaNotificationListener.Callback {
         public String artist = "";
         public Bitmap albumArt;
         public boolean playing;
+        public boolean isBluetoothSource;
+        public boolean btA2dpConnected;
         public long durationMs;
         public long positionMs;
         public long positionUpdateTimeMs;
@@ -65,14 +68,17 @@ public final class MediaHub implements MediaNotificationListener.Callback {
     private final Listener listener;
     private final AudioManager audioManager;
     private final MediaSessionManager sessionManager;
+    private final TechBtMusicClient btMusicClient;
     private final List<MediaController> tracked = new ArrayList<MediaController>();
     private MediaController activeController;
 
     private final MediaState state = new MediaState();
+    private TechBtMusicClient.BtMusicSnapshot btSnap = new TechBtMusicClient.BtMusicSnapshot();
     private String notifPkg = "";
     private String notifTitle = "";
     private String notifArtist = "";
     private Bitmap notifArt = null;
+    private long localLastUpdateMs = 0L;
 
     private boolean started = false;
 
@@ -87,12 +93,14 @@ public final class MediaHub implements MediaNotificationListener.Callback {
     private final MediaController.Callback controllerCallback = new MediaController.Callback() {
         @Override
         public void onPlaybackStateChanged(PlaybackState pb) {
-            refreshFromControllers();
+            localLastUpdateMs = System.currentTimeMillis();
+            refreshCombinedState();
         }
 
         @Override
         public void onMetadataChanged(MediaMetadata metadata) {
-            refreshFromControllers();
+            localLastUpdateMs = System.currentTimeMillis();
+            refreshCombinedState();
         }
 
         @Override
@@ -115,24 +123,25 @@ public final class MediaHub implements MediaNotificationListener.Callback {
         this.listener = listener;
         this.audioManager = (AudioManager) this.ctx.getSystemService(Context.AUDIO_SERVICE);
         this.sessionManager = (MediaSessionManager) this.ctx.getSystemService(Context.MEDIA_SESSION_SERVICE);
+        this.btMusicClient = new TechBtMusicClient(this.ctx, this);
     }
 
     public void start() {
         if (started) return;
         started = true;
         MediaNotificationListener.setCallback(this);
+        btMusicClient.start();
         if (sessionManager != null) {
             ComponentName nlsComp = new ComponentName(ctx, MediaNotificationListener.class);
             try {
                 sessionManager.addOnActiveSessionsChangedListener(sessionsListener, null, handler);
                 bindControllers(sessionManager.getActiveSessions(null));
             } catch (SecurityException se) {
-                Log.w(TAG, "getActiveSessions(null) denied, trying with NLS component", se);
                 try {
                     sessionManager.addOnActiveSessionsChangedListener(sessionsListener, nlsComp, handler);
                     bindControllers(sessionManager.getActiveSessions(nlsComp));
                 } catch (Throwable t) {
-                    Log.w(TAG, "MediaSessionManager unavailable, relying on NotificationListener + media keys", t);
+                    Log.w(TAG, "MediaSessionManager unavailable", t);
                 }
             } catch (Throwable t) {
                 Log.w(TAG, "MediaSessionManager init error", t);
@@ -146,10 +155,15 @@ public final class MediaHub implements MediaNotificationListener.Callback {
         started = false;
         handler.removeCallbacks(periodicPoll);
         MediaNotificationListener.setCallback(null);
+        btMusicClient.stop();
         if (sessionManager != null) {
             try { sessionManager.removeOnActiveSessionsChangedListener(sessionsListener); } catch (Throwable ignored) {}
         }
         clearTracked();
+    }
+
+    public boolean isBtA2dpConnected() {
+        return btSnap != null && btSnap.a2dpConnected;
     }
 
     private void pollSessions() {
@@ -177,88 +191,64 @@ public final class MediaHub implements MediaNotificationListener.Callback {
             for (MediaController mc : list) {
                 if (mc == null) continue;
                 String pkg = mc.getPackageName();
-                if ("com.android.server.telecom".equals(pkg)) continue;
+                if ("com.android.server.telecom".equals(pkg) || "com.carsyso.bluetooth".equals(pkg)) continue;
                 tracked.add(mc);
                 try { mc.registerCallback(controllerCallback, handler); } catch (Throwable ignored) {}
             }
         }
-        refreshFromControllers();
+        refreshCombinedState();
     }
 
-    private void refreshFromControllers() {
-        MediaController best = null;
-        // 1. Prefer any actively playing controller
+    @Override
+    public void onBtMusicChanged(TechBtMusicClient.BtMusicSnapshot snapshot) {
+        this.btSnap = snapshot;
+        refreshCombinedState();
+    }
+
+    private void refreshCombinedState() {
+        MediaController localPlaying = null;
+        MediaController localRecent = null;
+
         for (MediaController mc : tracked) {
             PlaybackState pb = mc.getPlaybackState();
-            if (pb != null && pb.getState() == PlaybackState.STATE_PLAYING) {
-                best = mc;
+            int st = pb != null ? pb.getState() : PlaybackState.STATE_NONE;
+            if (st == PlaybackState.STATE_PLAYING) {
+                localPlaying = mc;
                 break;
             }
-        }
-        // 2. Otherwise prefer one that has metadata title
-        if (best == null) {
-            for (MediaController mc : tracked) {
+            if (localRecent == null && st != PlaybackState.STATE_ERROR) {
                 MediaMetadata mm = mc.getMetadata();
                 if (mm != null && !TextUtils.isEmpty(mm.getString(MediaMetadata.METADATA_KEY_TITLE))) {
-                    best = mc;
-                    break;
+                    localRecent = mc;
                 }
             }
         }
-        // 3. Otherwise first tracked controller
-        if (best == null && !tracked.isEmpty()) {
-            best = tracked.get(0);
-        }
 
-        activeController = best;
+        boolean btPlaying = btSnap != null && btSnap.playing;
+        boolean btHasInfo = btSnap != null && btSnap.a2dpConnected && !TextUtils.isEmpty(btSnap.title);
 
-        if (best != null) {
-            String pkg = best.getPackageName();
-            MediaMetadata mm = best.getMetadata();
-            PlaybackState pb = best.getPlaybackState();
+        state.btA2dpConnected = btSnap != null && btSnap.a2dpConnected;
 
-            String title = mm != null ? safeStr(mm.getString(MediaMetadata.METADATA_KEY_TITLE)) : "";
-            String artist = mm != null ? safeStr(mm.getString(MediaMetadata.METADATA_KEY_ARTIST)) : "";
-            if (TextUtils.isEmpty(artist) && mm != null) {
-                artist = safeStr(mm.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST));
-            }
-            if (TextUtils.isEmpty(artist) && mm != null) {
-                artist = safeStr(mm.getString(MediaMetadata.METADATA_KEY_ALBUM));
-            }
-            Bitmap art = null;
-            if (mm != null) {
-                art = mm.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
-                if (art == null) art = mm.getBitmap(MediaMetadata.METADATA_KEY_ART);
-                if (art == null) art = mm.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON);
-            }
-            long duration = mm != null ? mm.getLong(MediaMetadata.METADATA_KEY_DURATION) : 0L;
-
-            // Merge with notification metadata if session has empty title (common on BT AVRCP)
-            if (TextUtils.isEmpty(title) && !TextUtils.isEmpty(notifTitle) && pkg.equals(notifPkg)) {
-                title = notifTitle;
-                if (TextUtils.isEmpty(artist)) artist = notifArtist;
-                if (art == null) art = notifArt;
-            }
-
-            state.hasSession = true;
-            state.packageName = pkg;
-            state.sourceLabel = UiUtil.getAppLabel(ctx, pkg);
-            state.title = title;
-            state.artist = artist;
-            state.albumArt = art;
-            state.durationMs = Math.max(0L, duration);
-            if (pb != null) {
-                state.playing = (pb.getState() == PlaybackState.STATE_PLAYING);
-                state.positionMs = Math.max(0L, pb.getPosition());
-                state.positionUpdateTimeMs = pb.getLastPositionUpdateTime();
-                state.playbackSpeed = pb.getPlaybackSpeed();
-            } else {
-                state.playing = audioManager != null && audioManager.isMusicActive();
-                state.positionMs = 0L;
-                state.positionUpdateTimeMs = 0L;
-            }
+        // Priority:
+        // 1. Phone BT music/video actively playing (unless a local box MediaController is also actively playing more recently)
+        // 2. Local box MediaController actively playing
+        // 3. Phone BT music/video with metadata & connected A2DP (when no local app is playing and BT updated >= local)
+        // 4. Local box paused MediaController with metadata
+        // 5. Notification fallback / Idle
+        if (btPlaying && (localPlaying == null || btSnap.lastUpdateMs >= localLastUpdateMs)) {
+            applyBluetoothState();
+        } else if (localPlaying != null) {
+            applyLocalController(localPlaying);
+        } else if (btHasInfo && (localRecent == null || btSnap.lastUpdateMs >= localLastUpdateMs)) {
+            applyBluetoothState();
+        } else if (localRecent != null) {
+            applyLocalController(localRecent);
+        } else if (btHasInfo) {
+            applyBluetoothState();
         } else if (!TextUtils.isEmpty(notifTitle)) {
+            activeController = null;
             state.hasSession = true;
+            state.isBluetoothSource = "com.carsyso.bluetooth".equals(notifPkg) || "com.android.bluetooth".equals(notifPkg);
             state.packageName = notifPkg;
             state.sourceLabel = UiUtil.getAppLabel(ctx, notifPkg);
             state.title = notifTitle;
@@ -267,19 +257,81 @@ public final class MediaHub implements MediaNotificationListener.Callback {
             state.playing = audioManager != null && audioManager.isMusicActive();
             state.durationMs = 0L;
             state.positionMs = 0L;
+            state.positionUpdateTimeMs = 0L;
         } else {
+            activeController = null;
             state.hasSession = false;
-            state.packageName = "";
+            state.isBluetoothSource = state.btA2dpConnected;
+            state.packageName = state.btA2dpConnected ? "com.carsyso.bluetooth" : "";
             state.sourceLabel = "蓝牙音乐";
             state.title = "";
             state.artist = "";
             state.albumArt = null;
-            state.playing = audioManager != null && audioManager.isMusicActive();
+            state.playing = false;
             state.durationMs = 0L;
             state.positionMs = 0L;
+            state.positionUpdateTimeMs = 0L;
         }
 
         notifyListener();
+    }
+
+    private void applyBluetoothState() {
+        activeController = null;
+        state.hasSession = true;
+        state.isBluetoothSource = true;
+        state.packageName = "com.carsyso.bluetooth";
+        state.sourceLabel = "蓝牙音乐";
+        state.title = !TextUtils.isEmpty(btSnap.title) ? btSnap.title : (btSnap.playing ? "手机蓝牙播放中" : "");
+        state.artist = !TextUtils.isEmpty(btSnap.artist) ? btSnap.artist : "手机蓝牙音频";
+        state.albumArt = null;
+        state.playing = btSnap.playing;
+        state.durationMs = Math.max(0L, btSnap.durationMs);
+        state.positionMs = Math.max(0L, btSnap.positionMs);
+        state.positionUpdateTimeMs = SystemClock.elapsedRealtime();
+        state.playbackSpeed = 1f;
+    }
+
+    private void applyLocalController(MediaController mc) {
+        activeController = mc;
+        String pkg = mc.getPackageName();
+        MediaMetadata mm = mc.getMetadata();
+        PlaybackState pb = mc.getPlaybackState();
+
+        String title = mm != null ? safeStr(mm.getString(MediaMetadata.METADATA_KEY_TITLE)) : "";
+        String artist = mm != null ? safeStr(mm.getString(MediaMetadata.METADATA_KEY_ARTIST)) : "";
+        if (TextUtils.isEmpty(artist) && mm != null) {
+            artist = safeStr(mm.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST));
+        }
+        if (TextUtils.isEmpty(artist) && mm != null) {
+            artist = safeStr(mm.getString(MediaMetadata.METADATA_KEY_ALBUM));
+        }
+        Bitmap art = null;
+        if (mm != null) {
+            art = mm.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
+            if (art == null) art = mm.getBitmap(MediaMetadata.METADATA_KEY_ART);
+            if (art == null) art = mm.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON);
+        }
+        long duration = mm != null ? mm.getLong(MediaMetadata.METADATA_KEY_DURATION) : 0L;
+
+        state.hasSession = true;
+        state.isBluetoothSource = "com.carsyso.bluetooth".equals(pkg) || "com.android.bluetooth".equals(pkg);
+        state.packageName = pkg;
+        state.sourceLabel = UiUtil.getAppLabel(ctx, pkg);
+        state.title = title;
+        state.artist = artist;
+        state.albumArt = art;
+        state.durationMs = Math.max(0L, duration);
+        if (pb != null) {
+            state.playing = (pb.getState() == PlaybackState.STATE_PLAYING);
+            state.positionMs = Math.max(0L, pb.getPosition());
+            state.positionUpdateTimeMs = pb.getLastPositionUpdateTime();
+            state.playbackSpeed = pb.getPlaybackSpeed();
+        } else {
+            state.playing = false;
+            state.positionMs = 0L;
+            state.positionUpdateTimeMs = 0L;
+        }
     }
 
     @Override
@@ -292,14 +344,7 @@ public final class MediaHub implements MediaNotificationListener.Callback {
                 notifTitle = title != null ? title : "";
                 notifArtist = artist != null ? artist : "";
                 if (art != null) notifArt = art;
-                if (token != null && activeController == null) {
-                    try {
-                        MediaController mc = new MediaController(ctx, token);
-                        tracked.add(mc);
-                        mc.registerCallback(controllerCallback, handler);
-                    } catch (Throwable ignored) {}
-                }
-                refreshFromControllers();
+                refreshCombinedState();
             }
         });
     }
@@ -313,7 +358,7 @@ public final class MediaHub implements MediaNotificationListener.Callback {
                     notifTitle = "";
                     notifArtist = "";
                     notifArt = null;
-                    refreshFromControllers();
+                    refreshCombinedState();
                 }
             }
         });
@@ -324,22 +369,24 @@ public final class MediaHub implements MediaNotificationListener.Callback {
     }
 
     public void playPause() {
+        if (state.isBluetoothSource || (activeController == null && isBtA2dpConnected())) {
+            boolean ok = state.playing ? btMusicClient.pause() : btMusicClient.play();
+            if (ok) return;
+        }
         if (activeController != null) {
             try {
-                if (state.playing) {
-                    activeController.getTransportControls().pause();
-                } else {
-                    activeController.getTransportControls().play();
-                }
+                if (state.playing) activeController.getTransportControls().pause();
+                else activeController.getTransportControls().play();
                 return;
-            } catch (Throwable t) {
-                Log.w(TAG, "TransportControls playPause failed, fallback to key", t);
-            }
+            } catch (Throwable ignored) {}
         }
         dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
     }
 
     public void next() {
+        if (state.isBluetoothSource || (activeController == null && isBtA2dpConnected())) {
+            if (btMusicClient.next()) return;
+        }
         if (activeController != null) {
             try {
                 activeController.getTransportControls().skipToNext();
@@ -350,6 +397,9 @@ public final class MediaHub implements MediaNotificationListener.Callback {
     }
 
     public void previous() {
+        if (state.isBluetoothSource || (activeController == null && isBtA2dpConnected())) {
+            if (btMusicClient.previous()) return;
+        }
         if (activeController != null) {
             try {
                 activeController.getTransportControls().skipToPrevious();

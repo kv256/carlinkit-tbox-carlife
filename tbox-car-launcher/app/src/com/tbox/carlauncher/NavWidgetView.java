@@ -79,7 +79,7 @@ public class NavWidgetView extends FrameLayout {
         tvBadge.setTextColor(0xFF7DD3FC);
         tvBadge.setTextSize(TypedValue.COMPLEX_UNIT_PX, 17f);
         tvBadge.setPadding(14, 5, 14, 5);
-        tvBadge.setBackground(UiUtil.solidRounded(0x2238BDF8, 14f, 0x4438BDF8, 1));
+        tvBadge.setBackground(UiUtil.solidRounded(0x1C38BDF8, 14f, 0, 0));
         header.addView(tvBadge);
 
         View gearBtn = makeSmallIconBtn(context, ICON_GEAR);
@@ -105,7 +105,7 @@ public class NavWidgetView extends FrameLayout {
         tvHomeSub = new TextView(context);
         View homeCard = makeQuickDestCard(
             context, "回家", tvHomeSub, "一键开始导航",
-            0xFF1A437A, 0xFF112A4E, 0x4D38BDF8, ICON_HOME,
+            0xFF1A4073, 0xFF11284A, 0, ICON_HOME,
             new OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -120,7 +120,7 @@ public class NavWidgetView extends FrameLayout {
         tvCompanySub = new TextView(context);
         View companyCard = makeQuickDestCard(
             context, "去公司", tvCompanySub, "一键开始导航",
-            0xFF5C3A16, 0xFF3A230D, 0x4DF59E0B, ICON_WORK,
+            0xFF563616, 0xFF36210C, 0, ICON_WORK,
             new OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -165,7 +165,7 @@ public class NavWidgetView extends FrameLayout {
         activeRoot = new LinearLayout(context);
         activeRoot.setOrientation(LinearLayout.VERTICAL);
         activeRoot.setPadding(24, 20, 24, 20);
-        activeRoot.setBackground(UiUtil.cardDrawable(0xFF0E2C3A, 0xFF0B1924, 24f, 0x5538BDF8, 2));
+        activeRoot.setBackground(UiUtil.cardDrawable(0xFF0E2C3A, 0xFF0B1924, 24f, 0x2638BDF8, 1));
         activeRoot.setVisibility(GONE);
         activeRoot.setOnClickListener(new OnClickListener() {
             @Override
@@ -181,7 +181,7 @@ public class NavWidgetView extends FrameLayout {
         topGuide.setGravity(Gravity.CENTER_VERTICAL);
 
         FrameLayout iconBox = new FrameLayout(context);
-        iconBox.setBackground(UiUtil.solidRounded(0xFF164E63, 22f, 0x5538BDF8, 2));
+        iconBox.setBackground(UiUtil.solidRounded(0xFF164E63, 22f, 0, 0));
         iconBox.setPadding(14, 14, 14, 14);
         maneuverIcon = new ManeuverIconView(context);
         iconBox.addView(maneuverIcon, new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
@@ -324,7 +324,7 @@ public class NavWidgetView extends FrameLayout {
         card.setOrientation(LinearLayout.VERTICAL);
         card.setGravity(Gravity.CENTER_VERTICAL);
         card.setPadding(20, 16, 18, 16);
-        card.setBackground(UiUtil.cardDrawable(topColor, botColor, 20f, borderColor, 2));
+        card.setBackground(UiUtil.cardDrawable(topColor, botColor, 20f, borderColor, borderColor != 0 ? 1 : 0));
         card.setOnClickListener(click);
         UiUtil.addPressScale(card);
 
@@ -359,7 +359,7 @@ public class NavWidgetView extends FrameLayout {
         tv.setTextSize(TypedValue.COMPLEX_UNIT_PX, 20f);
         tv.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         tv.setGravity(Gravity.CENTER);
-        tv.setBackground(UiUtil.solidRounded(bgColor, 16f, 0x22FFFFFF, 1));
+        tv.setBackground(UiUtil.solidRounded(bgColor, 16f, 0, 0));
         tv.setOnClickListener(click);
         UiUtil.addPressScale(tv);
         return tv;

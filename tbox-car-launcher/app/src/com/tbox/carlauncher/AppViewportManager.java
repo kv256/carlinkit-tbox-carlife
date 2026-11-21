@@ -187,7 +187,7 @@ public final class AppViewportManager {
         container.addView(surfaceView, 0,
             new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
-        cornerOverlay = new RoundedCornerFrameOverlay(ctx, 20f, UiUtil.BG_CANVAS, 0x28FFFFFF);
+        cornerOverlay = new RoundedCornerFrameOverlay(ctx, 20f, UiUtil.BG_CANVAS, 0x0DFFFFFF);
         container.addView(cornerOverlay, 1,
             new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
     }
@@ -340,6 +340,23 @@ public final class AppViewportManager {
 
     public String getCurrentAppPackage() {
         return currentAppPkg;
+    }
+
+    public boolean uninstallUserPackage(String pkg) {
+        IBinder b = getBridge();
+        if (b == null || pkg == null || pkg.isEmpty()) return false;
+        Parcel data = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
+            data.writeString(pkg);
+            b.transact(VdInputBridge.TX_UNINSTALL, data, null, IBinder.FLAG_ONEWAY);
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "TX_UNINSTALL failed for " + pkg, t);
+            return false;
+        } finally {
+            data.recycle();
+        }
     }
 
     public boolean launchPackage(String pkg) {
@@ -533,7 +550,7 @@ public final class AppViewportManager {
             maskPaint.setStyle(Paint.Style.FILL);
             borderPaint.setColor(borderColor);
             borderPaint.setStyle(Paint.Style.STROKE);
-            borderPaint.setStrokeWidth(2f);
+            borderPaint.setStrokeWidth(1f);
         }
 
         @Override

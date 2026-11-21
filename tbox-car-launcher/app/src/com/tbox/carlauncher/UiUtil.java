@@ -19,9 +19,9 @@ import android.view.View;
 
 public final class UiUtil {
     public static final int BG_CANVAS = 0xFF070A0F;
-    public static final int CARD_BG_TOP = 0xFF151B26;
-    public static final int CARD_BG_BOT = 0xFF10151E;
-    public static final int CARD_BORDER = 0x22FFFFFF;
+    public static final int CARD_BG_TOP = 0xFF141923;
+    public static final int CARD_BG_BOT = 0xFF0F141D;
+    public static final int CARD_BORDER = 0x0DFFFFFF;
     public static final int ACCENT_BLUE = 0xFF38BDF8;
     public static final int ACCENT_GREEN = 0xFF22C55E;
     public static final int ACCENT_AMBER = 0xFFF59E0B;
@@ -51,7 +51,7 @@ public final class UiUtil {
     }
 
     public static GradientDrawable glassCard(float radiusPx) {
-        return cardDrawable(CARD_BG_TOP, CARD_BG_BOT, radiusPx, CARD_BORDER, 2);
+        return cardDrawable(CARD_BG_TOP, CARD_BG_BOT, radiusPx, CARD_BORDER, 1);
     }
 
     public static void addPressScale(final View v) {

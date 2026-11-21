@@ -82,7 +82,7 @@ public class MusicWidgetView extends LinearLayout {
         UiUtil.addPressScale(topRow);
 
         FrameLayout artBox = new FrameLayout(context);
-        artBox.setBackground(UiUtil.cardDrawable(0xFF1F2937, 0xFF111827, 20f, 0x26FFFFFF, 2));
+        artBox.setBackground(UiUtil.cardDrawable(0xFF1D2636, 0xFF111827, 20f, 0, 0));
         vinylPlaceholder = new VinylPlaceholderView(context);
         artBox.addView(vinylPlaceholder, new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
@@ -241,7 +241,7 @@ public class MusicWidgetView extends LinearLayout {
                 ivArt.setVisibility(VISIBLE);
                 vinylPlaceholder.setVisibility(GONE);
                 currentBgTint = UiUtil.extractDarkTint(s.albumArt, UiUtil.CARD_BG_TOP);
-                setBackground(UiUtil.cardDrawable(currentBgTint, 0xFF10151E, 24f, 0x2EFFFFFF, 2));
+                setBackground(UiUtil.cardDrawable(currentBgTint, 0xFF0F141D, 24f, UiUtil.CARD_BORDER, 1));
             } else {
                 ivArt.setVisibility(GONE);
                 vinylPlaceholder.setVisibility(VISIBLE);

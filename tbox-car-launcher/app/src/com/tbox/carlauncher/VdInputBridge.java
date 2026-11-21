@@ -42,6 +42,7 @@ public final class VdInputBridge {
     public static final int TX_KEY = IBinder.FIRST_CALL_TRANSACTION + 3;
     public static final int TX_LAUNCH = IBinder.FIRST_CALL_TRANSACTION + 4;
     public static final int TX_MOVE_STACK = IBinder.FIRST_CALL_TRANSACTION + 5;
+    public static final int TX_UNINSTALL = IBinder.FIRST_CALL_TRANSACTION + 6;
 
     private static final int VD_FLAGS = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
         | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
@@ -249,6 +250,25 @@ public final class VdInputBridge {
         });
     }
 
+    private static void uninstallPackage(final String pkg) {
+        if (pkg == null || pkg.isEmpty() || "com.tbox.carlauncher".equals(pkg) || pkg.startsWith("com.android.")) {
+            return;
+        }
+        cmdExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Log.i(TAG, "Uninstalling user package: " + pkg);
+                    Process p = new ProcessBuilder("/system/bin/pm", "uninstall", pkg)
+                        .redirectErrorStream(true).start();
+                    p.waitFor();
+                } catch (Throwable t) {
+                    Log.w(TAG, "pm uninstall failed: " + pkg, t);
+                }
+            }
+        });
+    }
+
     private static final class BridgeBinder extends Binder {
         @Override
         protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
@@ -305,6 +325,11 @@ public final class VdInputBridge {
                     int launcherTaskId = data.readInt();
                     int launcherStackId = data.readInt();
                     moveStack(stackId, launcherTaskId, launcherStackId);
+                    return true;
+                } else if (code == TX_UNINSTALL) {
+                    data.enforceInterface(DESCRIPTOR);
+                    final String pkg = data.readString();
+                    uninstallPackage(pkg);
                     return true;
                 }
             } finally {

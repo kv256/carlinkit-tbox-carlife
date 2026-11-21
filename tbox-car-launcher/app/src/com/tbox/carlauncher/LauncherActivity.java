@@ -8,8 +8,10 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.ApplicationInfo;
 import android.graphics.Color;
 import android.net.ConnectivityManager;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -103,6 +105,7 @@ public class LauncherActivity extends Activity {
             @Override
             public void onMediaStateChanged(MediaHub.MediaState state) {
                 if (musicWidgetView != null) musicWidgetView.updateMediaState(state);
+                if (dockView != null && state != null) dockView.setBtConnected(state.btA2dpConnected);
             }
         });
         mediaHub.start();
@@ -369,6 +372,7 @@ public class LauncherActivity extends Activity {
             sendBroadcast(i1);
             Intent i2 = new Intent("com.aispeech.lyra.action.TOGGLE_SPEECH");
             sendBroadcast(i2);
+            Toast.makeText(this, "唤醒语音助手", Toast.LENGTH_SHORT).show();
         } catch (Throwable t) {
             Log.w(TAG, "triggerVoiceAssistant error", t);
         }
@@ -395,13 +399,23 @@ public class LauncherActivity extends Activity {
     }
 
     private void showAppOptionsDialog(final AppDrawerView.AppEntry app) {
-        String[] items = new String[]{
-            "固定到左侧 Dock 第 1 位",
-            "固定到左侧 Dock 第 2 位",
-            "固定到左侧 Dock 第 3 位",
-            "固定到左侧 Dock 第 4 位",
-            "设为开机默认在主区打开"
-        };
+        final boolean canUninstall = isUserInstalledApp(app.packageName);
+        String[] items = canUninstall
+            ? new String[]{
+                "固定到左侧 Dock 第 1 位",
+                "固定到左侧 Dock 第 2 位",
+                "固定到左侧 Dock 第 3 位",
+                "固定到左侧 Dock 第 4 位",
+                "设为开机默认在主区打开",
+                "卸载应用（删除）"
+            }
+            : new String[]{
+                "固定到左侧 Dock 第 1 位",
+                "固定到左侧 Dock 第 2 位",
+                "固定到左侧 Dock 第 3 位",
+                "固定到左侧 Dock 第 4 位",
+                "设为开机默认在主区打开"
+            };
         new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
             .setTitle(app.label)
             .setItems(items, new DialogInterface.OnClickListener() {
@@ -411,9 +425,55 @@ public class LauncherActivity extends Activity {
                         prefs.setDockPackage(which, app.packageName);
                         dockView.setDockPackages(prefs.getDockPackages());
                         Toast.makeText(LauncherActivity.this, "已固定 " + app.label + " 到 Dock " + (which + 1), Toast.LENGTH_SHORT).show();
-                    } else {
+                    } else if (which == 4) {
                         prefs.setAutoLaunchPackage(app.packageName);
                         Toast.makeText(LauncherActivity.this, "开机将自动在 16:9 主区打开 " + app.label, Toast.LENGTH_SHORT).show();
+                    } else if (which == 5 && canUninstall) {
+                        confirmUninstallApp(app);
+                    }
+                }
+            })
+            .setNegativeButton("取消", null)
+            .show();
+    }
+
+    private boolean isUserInstalledApp(String pkg) {
+        if (TextUtils.isEmpty(pkg) || "com.tbox.carlauncher".equals(pkg) || "com.tbox.usbswitch".equals(pkg)) {
+            return false;
+        }
+        try {
+            ApplicationInfo ai = getPackageManager().getApplicationInfo(pkg, 0);
+            return (ai.flags & ApplicationInfo.FLAG_SYSTEM) == 0;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private void confirmUninstallApp(final AppDrawerView.AppEntry app) {
+        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("卸载应用")
+            .setMessage("确定要删除「" + app.label + "」(" + app.packageName + ") 吗？")
+            .setPositiveButton("确定卸载", new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface d, int w) {
+                    boolean ok = viewport != null && viewport.uninstallUserPackage(app.packageName);
+                    if (ok) {
+                        Toast.makeText(LauncherActivity.this, "正在卸载 " + app.label + "…", Toast.LENGTH_SHORT).show();
+                        handler.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (appDrawerView != null) appDrawerView.reloadApps(prefs);
+                                if (dockView != null) dockView.setDockPackages(prefs.getDockPackages());
+                            }
+                        }, 1800L);
+                    } else {
+                        try {
+                            Intent del = new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + app.packageName));
+                            del.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                            startActivity(del);
+                        } catch (Throwable t) {
+                            Toast.makeText(LauncherActivity.this, "卸载失败：" + t.getMessage(), Toast.LENGTH_SHORT).show();
+                        }
                     }
                 }
             })
@@ -495,8 +555,7 @@ public class LauncherActivity extends Activity {
             "设置「回家 / 去公司」地址",
             "开机默认主区：" + autoLabel + "（点击切换为应用网格 / 高德）",
             "打开 USB / 音频切换工具 (TboxUsbSwitch)",
-            "打开系统设置",
-            "临时返回原厂桌面 (XQLauncher3)"
+            "打开系统设置"
         };
         new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
             .setTitle("CarPlay 车机桌面设置")
@@ -517,16 +576,6 @@ public class LauncherActivity extends Activity {
                         openAppInViewport("com.tbox.usbswitch");
                     } else if (which == 3) {
                         openAppInViewport("com.android.settings");
-                    } else if (which == 4) {
-                        setGlobalImmersive(false);
-                        try {
-                            Intent i = new Intent();
-                            i.setClassName("com.android.launcher3", "com.android.launcher3.Launcher");
-                            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                            startActivity(i);
-                        } catch (Throwable t) {
-                            Toast.makeText(LauncherActivity.this, "无法打开原厂桌面", Toast.LENGTH_SHORT).show();
-                        }
                     }
                 }
             })

@@ -1,7 +1,6 @@
 #!/system/bin/sh
-# Keep TboxCarLauncher's VirtualDisplay & Input Bridge running as uid=1000 (system).
-# Running as uid=1000 matches sysCtx package "android" for DisplayManager.createVirtualDisplay,
-# owns the 1248x702 VirtualDisplay, and holds INJECT_EVENTS + INTERNAL_SYSTEM_WINDOW natively.
+# Keep TboxCarLauncher's VirtualDisplay & Input Bridge running as uid=1000 (system),
+# and suppress the OEM left-edge NavigationBar (SdNavigationBarView) cleanly on boot.
 (
   while [ "$(getprop sys.boot_completed)" != "1" ]; do
     sleep 1
@@ -11,6 +10,13 @@
   settings put global force_resizable_activities 1 >/dev/null 2>&1 || true
   settings put global hidden_api_policy_p_apps 1 >/dev/null 2>&1 || true
   settings put global hidden_api_policy_pre_p_apps 1 >/dev/null 2>&1 || true
+
+  # Completely remove OEM left-edge NavigationBar (SdNavigationBarView) so left-edge hover/swipe never shows it
+  setprop persist.suding.hasnavibar false >/dev/null 2>&1 || true
+  resetprop qemu.hw.mainkeys 1 >/dev/null 2>&1 || true
+  if dumpsys window windows 2>/dev/null | grep -q "NavigationBar"; then
+    killall com.android.systemui >/dev/null 2>&1 || true
+  fi
 
   while true; do
     APK="$(pm path com.tbox.carlauncher 2>/dev/null | head -n 1 | sed 's/^package://')"

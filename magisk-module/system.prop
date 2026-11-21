@@ -1,1 +1,4 @@
 bluetooth.hfp.client=0
+qemu.hw.mainkeys=1
+ro.sys.has.navibar=false
+persist.suding.hasnavibar=false

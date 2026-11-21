@@ -1,6 +1,7 @@
 package com.tbox.carlauncher;
 
 import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothProfile;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
@@ -26,9 +27,9 @@ import java.util.Locale;
 
 /**
  * Left 112x702 CarPlay-inspired vertical Dock:
- * - Top: Crisp clock + Wi-Fi & BT status dots
+ * - Top: Crisp clock (long-press opens Settings) + vector Wi-Fi & Bluetooth status icons
  * - Middle: 4 customizable quick-launch app slots with active left pill indicator
- * - Bottom: Home/Grid toggle, Back button, Voice/Settings button
+ * - Bottom: Back button + Home/App-Drawer toggle (long-press triggers Voice Assistant)
  */
 public class DockView extends LinearLayout {
     public interface Callbacks {
@@ -42,8 +43,8 @@ public class DockView extends LinearLayout {
 
     private final Callbacks callbacks;
     private final TextView tvClock;
-    private final View wifiDot;
-    private final View btDot;
+    private final StatusVectorView wifiIcon;
+    private final StatusVectorView btIcon;
 
     private final FrameLayout[] slotContainers = new FrameLayout[LauncherPrefs.DOCK_SLOT_COUNT];
     private final View[] slotIndicators = new View[LauncherPrefs.DOCK_SLOT_COUNT];
@@ -55,37 +56,45 @@ public class DockView extends LinearLayout {
 
     private String activePkg = "";
     private boolean drawerVisible = false;
+    private boolean btA2dpConnected = false;
 
     public DockView(Context context, Callbacks cb) {
         super(context);
         this.callbacks = cb;
         setOrientation(VERTICAL);
         setGravity(Gravity.CENTER_HORIZONTAL);
-        setPadding(8, 16, 8, 14);
-        setBackground(UiUtil.cardDrawable(0xFF131924, 0xFF0E131B, 24f, UiUtil.CARD_BORDER, 2));
+        setPadding(8, 18, 8, 16);
+        setBackground(UiUtil.cardDrawable(0xFF131823, 0xFF0E131B, 24f, UiUtil.CARD_BORDER, 1));
 
-        // 1. Clock + status dots
+        // 1. Clock (long-press opens Launcher Settings) + vector Wi-Fi / BT status icons
         tvClock = new TextView(context);
         tvClock.setTextColor(0xFFFFFFFF);
         tvClock.setTextSize(TypedValue.COMPLEX_UNIT_PX, 27f);
         tvClock.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
         tvClock.setGravity(Gravity.CENTER);
         tvClock.setIncludeFontPadding(false);
+        tvClock.setOnLongClickListener(new OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                if (callbacks != null) callbacks.onSettingsLongClicked();
+                return true;
+            }
+        });
         addView(tvClock, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
         LinearLayout statusRow = new LinearLayout(context);
         statusRow.setOrientation(HORIZONTAL);
         statusRow.setGravity(Gravity.CENTER);
         LayoutParams stLp = new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        stLp.topMargin = 8;
-        stLp.bottomMargin = 10;
+        stLp.topMargin = 10;
+        stLp.bottomMargin = 14;
 
-        wifiDot = makeStatusBadge(context, "W", 0xFF38BDF8);
-        btDot = makeStatusBadge(context, "B", 0xFF818CF8);
-        statusRow.addView(wifiDot);
-        LayoutParams btLp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-        btLp.leftMargin = 8;
-        statusRow.addView(btDot, btLp);
+        wifiIcon = new StatusVectorView(context, StatusVectorView.WIFI);
+        btIcon = new StatusVectorView(context, StatusVectorView.BT);
+        statusRow.addView(wifiIcon, new LayoutParams(24, 24));
+        LayoutParams btLp = new LayoutParams(24, 24);
+        btLp.leftMargin = 12;
+        statusRow.addView(btIcon, btLp);
         addView(statusRow, stLp);
 
         addDivider(context);
@@ -95,26 +104,26 @@ public class DockView extends LinearLayout {
         slotsCol.setOrientation(VERTICAL);
         slotsCol.setGravity(Gravity.CENTER);
         LayoutParams scLp = new LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f);
-        scLp.topMargin = 6;
-        scLp.bottomMargin = 6;
+        scLp.topMargin = 10;
+        scLp.bottomMargin = 10;
 
         for (int i = 0; i < LauncherPrefs.DOCK_SLOT_COUNT; i++) {
             final int slot = i;
             FrameLayout item = new FrameLayout(context);
-            LayoutParams itemLp = new LayoutParams(LayoutParams.MATCH_PARENT, 82);
-            itemLp.topMargin = (i == 0) ? 0 : 8;
+            LayoutParams itemLp = new LayoutParams(LayoutParams.MATCH_PARENT, 86);
+            itemLp.topMargin = (i == 0) ? 0 : 12;
             item.setLayoutParams(itemLp);
 
             View indicator = new View(context);
-            indicator.setBackground(UiUtil.solidRounded(UiUtil.ACCENT_BLUE, 4f, 0, 0));
+            indicator.setBackground(UiUtil.solidRounded(UiUtil.ACCENT_BLUE, 3f, 0, 0));
             indicator.setVisibility(INVISIBLE);
-            FrameLayout.LayoutParams indLp = new FrameLayout.LayoutParams(6, 36);
+            FrameLayout.LayoutParams indLp = new FrameLayout.LayoutParams(5, 34);
             indLp.gravity = Gravity.START | Gravity.CENTER_VERTICAL;
             item.addView(indicator, indLp);
 
             ImageView icon = new ImageView(context);
             icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            FrameLayout.LayoutParams icLp = new FrameLayout.LayoutParams(68, 68);
+            FrameLayout.LayoutParams icLp = new FrameLayout.LayoutParams(70, 70);
             icLp.gravity = Gravity.CENTER;
             item.addView(icon, icLp);
 
@@ -142,7 +151,7 @@ public class DockView extends LinearLayout {
 
         addDivider(context);
 
-        // 3. Bottom system controls: Back, Voice/Settings, Home/Grid
+        // 3. Bottom system controls: Back + merged App Drawer (short press) / Voice Assistant (long press)
         View backBtn = makeUtilButton(context, new DockGlyphView(context, DockGlyphView.BACK, 0xFFE2E8F0),
             new OnClickListener() {
                 @Override
@@ -150,27 +159,9 @@ public class DockView extends LinearLayout {
                     if (callbacks != null) callbacks.onBackClicked();
                 }
             }, null);
-        LayoutParams utilLp1 = new LayoutParams(76, 56);
-        utilLp1.topMargin = 10;
+        LayoutParams utilLp1 = new LayoutParams(78, 58);
+        utilLp1.topMargin = 14;
         addView(backBtn, utilLp1);
-
-        View voiceBtn = makeUtilButton(context, new DockGlyphView(context, DockGlyphView.MIC, 0xFF38BDF8),
-            new OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    if (callbacks != null) callbacks.onVoiceClicked();
-                }
-            },
-            new OnLongClickListener() {
-                @Override
-                public boolean onLongClick(View v) {
-                    if (callbacks != null) callbacks.onSettingsLongClicked();
-                    return true;
-                }
-            });
-        LayoutParams utilLp2 = new LayoutParams(76, 56);
-        utilLp2.topMargin = 8;
-        addView(voiceBtn, utilLp2);
 
         homeGlyph = new DockGlyphView(context, DockGlyphView.GRID, 0xFFFFFFFF);
         homeBtn = makeUtilButton(context, homeGlyph,
@@ -183,40 +174,28 @@ public class DockView extends LinearLayout {
             new OnLongClickListener() {
                 @Override
                 public boolean onLongClick(View v) {
-                    if (callbacks != null) callbacks.onSettingsLongClicked();
+                    if (callbacks != null) callbacks.onVoiceClicked();
                     return true;
                 }
             });
-        LayoutParams utilLp3 = new LayoutParams(76, 60);
-        utilLp3.topMargin = 8;
-        addView(homeBtn, utilLp3);
+        LayoutParams utilLp2 = new LayoutParams(78, 62);
+        utilLp2.topMargin = 12;
+        addView(homeBtn, utilLp2);
 
         refreshClockAndStatus();
     }
 
     private void addDivider(Context ctx) {
         View v = new View(ctx);
-        v.setBackgroundColor(0x1EFFFFFF);
-        LayoutParams lp = new LayoutParams(56, 2);
+        v.setBackgroundColor(0x12FFFFFF);
+        LayoutParams lp = new LayoutParams(52, 1);
         addView(v, lp);
-    }
-
-    private View makeStatusBadge(Context ctx, String letter, int color) {
-        TextView tv = new TextView(ctx);
-        tv.setText(letter);
-        tv.setTextColor(color);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_PX, 13f);
-        tv.setTypeface(Typeface.DEFAULT_BOLD);
-        tv.setGravity(Gravity.CENTER);
-        tv.setPadding(7, 2, 7, 2);
-        tv.setBackground(UiUtil.solidRounded(0x1EFFFFFF, 8f, 0, 0));
-        return tv;
     }
 
     private FrameLayout makeUtilButton(Context ctx, View glyph, OnClickListener click, OnLongClickListener longClick) {
         FrameLayout f = new FrameLayout(ctx);
-        f.setBackground(UiUtil.solidRounded(0x16FFFFFF, 16f, 0x1AFFFFFF, 1));
-        f.setPadding(16, 10, 16, 10);
+        f.setBackground(UiUtil.solidRounded(0x12FFFFFF, 16f, 0, 0));
+        f.setPadding(18, 12, 18, 12);
         f.addView(glyph, new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
         f.setOnClickListener(click);
         if (longClick != null) f.setOnLongClickListener(longClick);
@@ -233,7 +212,7 @@ public class DockView extends LinearLayout {
             if (pkg != null) {
                 try {
                     Drawable d = pm.getApplicationIcon(pkg);
-                    bmp = UiUtil.drawableToRoundedBitmap(d, 68, 16f);
+                    bmp = UiUtil.drawableToRoundedBitmap(d, 70, 17f);
                 } catch (Throwable ignored) {}
             }
             if (bmp != null) {
@@ -251,17 +230,24 @@ public class DockView extends LinearLayout {
         updateHighlights();
     }
 
+    public void setBtConnected(boolean connected) {
+        if (this.btA2dpConnected != connected) {
+            this.btA2dpConnected = connected;
+            refreshClockAndStatus();
+        }
+    }
+
     private void updateHighlights() {
         for (int i = 0; i < LauncherPrefs.DOCK_SLOT_COUNT; i++) {
             boolean active = !drawerVisible && slotPackages[i] != null && slotPackages[i].equals(activePkg);
             slotIndicators[i].setVisibility(active ? VISIBLE : INVISIBLE);
             slotContainers[i].setBackground(active
-                ? UiUtil.solidRounded(0x2438BDF8, 18f, 0x4438BDF8, 1)
+                ? UiUtil.solidRounded(0x1C38BDF8, 18f, 0, 0)
                 : null);
         }
         homeBtn.setBackground(drawerVisible
-            ? UiUtil.solidRounded(0x3838BDF8, 16f, 0x8838BDF8, 2)
-            : UiUtil.solidRounded(0x16FFFFFF, 16f, 0x1AFFFFFF, 1));
+            ? UiUtil.solidRounded(0x2E38BDF8, 16f, 0, 0)
+            : UiUtil.solidRounded(0x12FFFFFF, 16f, 0, 0));
         homeGlyph.setKind(drawerVisible ? DockGlyphView.APP_RETURN : DockGlyphView.GRID);
     }
 
@@ -277,21 +263,90 @@ public class DockView extends LinearLayout {
                 wifiUp = ni != null && ni.isConnected();
             }
         } catch (Throwable ignored) {}
-        wifiDot.setAlpha(wifiUp ? 1.0f : 0.30f);
+        wifiIcon.setActive(wifiUp);
 
-        boolean btOn = false;
-        try {
-            BluetoothAdapter ba = BluetoothAdapter.getDefaultAdapter();
-            btOn = ba != null && ba.isEnabled();
-        } catch (Throwable ignored) {}
-        btDot.setAlpha(btOn ? 1.0f : 0.30f);
+        boolean btActive = btA2dpConnected;
+        if (!btActive) {
+            try {
+                BluetoothAdapter ba = BluetoothAdapter.getDefaultAdapter();
+                btActive = ba != null && ba.isEnabled()
+                    && (ba.getProfileConnectionState(BluetoothProfile.A2DP) == BluetoothProfile.STATE_CONNECTED
+                        || ba.getProfileConnectionState(BluetoothProfile.HEADSET) == BluetoothProfile.STATE_CONNECTED);
+            } catch (Throwable ignored) {}
+        }
+        btIcon.setActive(btActive);
+    }
+
+    /**
+     * Crisp vector Wi-Fi and Bluetooth connection icons for Dock header.
+     */
+    private static final class StatusVectorView extends View {
+        static final int WIFI = 1;
+        static final int BT = 2;
+
+        private final int kind;
+        private boolean active = false;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path path = new Path();
+
+        StatusVectorView(Context ctx, int kind) {
+            super(ctx);
+            this.kind = kind;
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeJoin(Paint.Join.ROUND);
+        }
+
+        void setActive(boolean a) {
+            if (this.active != a) {
+                this.active = a;
+                invalidate();
+            }
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float w = getWidth();
+            float h = getHeight();
+            float s = Math.min(w, h);
+            if (s <= 0) return;
+            c.save();
+            c.translate((w - s) * 0.5f, (h - s) * 0.5f);
+
+            int color = active
+                ? (kind == WIFI ? 0xFFE2E8F0 : 0xFF38BDF8)
+                : 0x4494A3B8;
+            paint.setColor(color);
+
+            if (kind == WIFI) {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(s * 0.105f);
+                // Outer arc
+                c.drawArc(new RectF(s * 0.08f, s * 0.18f, s * 0.92f, s * 1.02f), 225f, 90f, false, paint);
+                // Middle arc
+                c.drawArc(new RectF(s * 0.24f, s * 0.36f, s * 0.76f, s * 0.88f), 225f, 90f, false, paint);
+                // Center dot
+                paint.setStyle(Paint.Style.FILL);
+                c.drawCircle(s * 0.50f, s * 0.78f, s * 0.08f, paint);
+            } else {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(s * 0.105f);
+                path.reset();
+                path.moveTo(s * 0.28f, s * 0.30f);
+                path.lineTo(s * 0.72f, s * 0.68f);
+                path.lineTo(s * 0.50f, s * 0.88f);
+                path.lineTo(s * 0.50f, s * 0.12f);
+                path.lineTo(s * 0.72f, s * 0.32f);
+                path.lineTo(s * 0.28f, s * 0.70f);
+                c.drawPath(path, paint);
+            }
+            c.restore();
+        }
     }
 
     private static final class DockGlyphView extends View {
         static final int GRID = 1;
         static final int APP_RETURN = 2;
         static final int BACK = 3;
-        static final int MIC = 4;
 
         private int kind;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -343,13 +398,6 @@ public class DockView extends LinearLayout {
                 path.lineTo(s * 0.30f, s * 0.50f);
                 path.lineTo(s * 0.64f, s * 0.82f);
                 c.drawPath(path, paint);
-            } else if (kind == MIC) {
-                paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(s * 0.10f);
-                c.drawRoundRect(new RectF(s * 0.36f, s * 0.12f, s * 0.64f, s * 0.56f), s * 0.14f, s * 0.14f, paint);
-                c.drawArc(new RectF(s * 0.24f, s * 0.28f, s * 0.76f, s * 0.70f), 0f, 180f, false, paint);
-                c.drawLine(s * 0.50f, s * 0.70f, s * 0.50f, s * 0.88f, paint);
-                c.drawLine(s * 0.34f, s * 0.88f, s * 0.66f, s * 0.88f, paint);
             }
             c.restore();
         }
