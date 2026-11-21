@@ -53,7 +53,7 @@ public class MusicWidgetView extends LinearLayout {
         @Override
         public void run() {
             updateProgressUi();
-            if (currentState != null && currentState.playing) {
+            if (currentState != null && currentState.hasSession && currentState.playing) {
                 handler.postDelayed(this, 1000L);
             }
         }
@@ -251,16 +251,17 @@ public class MusicWidgetView extends LinearLayout {
         }
 
         updateProgressUi();
-        if (s.playing) {
+        if (s.hasSession && s.playing) {
             handler.postDelayed(progressTicker, 1000L);
         }
     }
 
     private void updateProgressUi() {
-        if (currentState == null || currentState.durationMs <= 0L) {
-            progressStrip.setProgress(currentState != null && currentState.playing ? 0.35f : 0f);
-            tvElapsed.setText(currentState != null && currentState.playing ? "正在播放" : "0:00");
-            tvDuration.setText(currentState != null && currentState.playing ? "LIVE" : "--:--");
+        if (currentState == null || !currentState.hasSession || currentState.durationMs <= 0L) {
+            boolean activePlaying = currentState != null && currentState.hasSession && currentState.playing;
+            progressStrip.setProgress(activePlaying ? 0.35f : 0f);
+            tvElapsed.setText(activePlaying ? "正在播放" : "0:00");
+            tvDuration.setText(activePlaying ? "LIVE" : "--:--");
             return;
         }
         long pos = currentState.estimatedPositionMs();

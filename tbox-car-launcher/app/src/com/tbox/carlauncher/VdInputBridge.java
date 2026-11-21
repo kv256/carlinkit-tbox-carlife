@@ -20,16 +20,21 @@ import android.view.MotionEvent;
 import android.view.Surface;
 
 import java.io.BufferedReader;
+import java.io.FileOutputStream;
 import java.io.FileReader;
+import java.io.InputStreamReader;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Lightweight root (uid=0) Binder companion service ("tbox_vd_bridge") for TboxCarLauncher.
- * Owns the 1248x702 16:9 VirtualDisplay so that InputManager.createInputForwarder(displayId)
- * succeeds natively (same owner UID + INJECT_EVENTS), giving full multi-touch, Back key,
- * app launching, and Display-0 task confinement with <1ms Binder latency.
+ * Lightweight system (uid=1000) Binder companion service ("tbox_vd_bridge") for TboxCarLauncher.
+ * 1) Owns the 1248x702 16:9 VirtualDisplay so InputManager.createInputForwarder(displayId)
+ *    succeeds natively, giving full multi-touch, Back key, app launching, and task confinement.
+ * 2) Monitors real-time Bluetooth A2DP connection/playback state from XQBluetooth's serial AT
+ *    reader (SuDing SD-835 / sdsdk816) and sends direct AVRCP AT commands to /dev/goc_serial so
+ *    Play/Pause/Next/Prev work reliably even in A2DP-only (HFP=0) phone-audio mode!
  */
 public final class VdInputBridge {
     private static final String TAG = "TboxVdInputBridge";
@@ -43,6 +48,24 @@ public final class VdInputBridge {
     public static final int TX_LAUNCH = IBinder.FIRST_CALL_TRANSACTION + 4;
     public static final int TX_MOVE_STACK = IBinder.FIRST_CALL_TRANSACTION + 5;
     public static final int TX_UNINSTALL = IBinder.FIRST_CALL_TRANSACTION + 6;
+    public static final int TX_BT_CMD = IBinder.FIRST_CALL_TRANSACTION + 7;
+    public static final int TX_BT_STATE = IBinder.FIRST_CALL_TRANSACTION + 8;
+
+    // BT AT command codes for TX_BT_CMD
+    public static final int BT_CMD_PLAY = 1;
+    public static final int BT_CMD_PAUSE = 2;
+    public static final int BT_CMD_TOGGLE = 3;
+    public static final int BT_CMD_NEXT = 4;
+    public static final int BT_CMD_PREV = 5;
+    public static final int BT_CMD_QUERY = 6;
+
+    // Authoritative A2DP state returned by TX_BT_STATE
+    public static final int BT_STATE_UNKNOWN = -1;
+    public static final int BT_STATE_DISCONNECTED = 0;
+    public static final int BT_STATE_PAUSED = 1;
+    public static final int BT_STATE_PLAYING = 2;
+
+    private static final String GOC_SERIAL_PATH = "/dev/goc_serial";
 
     private static final int VD_FLAGS = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
         | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
@@ -60,6 +83,17 @@ public final class VdInputBridge {
     private static int allowedLauncherUid = -1;
     private static final ExecutorService cmdExecutor = Executors.newSingleThreadExecutor();
 
+    // Real-time BT A2DP state & metadata tracked directly from sdsdk816 / XQBluetooth serial AT logs
+    private static final Object btWriteLock = new Object();
+    private static volatile int btA2dpState = BT_STATE_UNKNOWN;
+    private static volatile long btLastEventMs = 0L;
+    private static volatile long btLastQueryMs = 0L;
+    private static volatile String btTitle = "";
+    private static volatile String btArtist = "";
+    private static volatile String btAlbum = "";
+    private static volatile long btPosMs = 0L;
+    private static volatile long btDurMs = 0L;
+
     public static void main(String[] args) {
         Looper.prepareMainLooper();
         Log.i(TAG, "Starting VdInputBridge Binder service uid=" + android.os.Process.myUid());
@@ -68,6 +102,8 @@ public final class VdInputBridge {
             Log.e(TAG, "Failed to init system APIs, exiting");
             System.exit(1);
         }
+
+        startBtAtMonitor();
 
         Binder service = new BridgeBinder();
         if (!registerBinderService(SERVICE_NAME, service)) {
@@ -105,6 +141,176 @@ public final class VdInputBridge {
         } catch (Throwable t) {
             Log.e(TAG, "initSystemContextAndApis failed", t);
             return false;
+        }
+    }
+
+    private static void startBtAtMonitor() {
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                // Probe initial state shortly after logcat tail starts
+                Thread probe = new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try { Thread.sleep(1500L); } catch (InterruptedException ignored) {}
+                        if (btA2dpState == BT_STATE_UNKNOWN) {
+                            writeBtAt("AT#MV");
+                        }
+                    }
+                }, "BtAtInitProbe");
+                probe.setDaemon(true);
+                probe.start();
+
+                while (true) {
+                    Process proc = null;
+                    BufferedReader br = null;
+                    try {
+                        // Omit -T 1 so we replay boot history and immediately learn current MU/MY state
+                        proc = new ProcessBuilder(
+                            "/system/bin/logcat", "-v", "raw",
+                            "-s", "BTRead:D", "BTMusicManager2:D"
+                        ).redirectErrorStream(true).start();
+                        br = new BufferedReader(new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8));
+                        String line;
+                        while ((line = br.readLine()) != null) {
+                            parseBtLogLine(line);
+                        }
+                    } catch (Throwable ex) {
+                        Log.w(TAG, "BtAtMonitor loop error", ex);
+                    } finally {
+                        if (br != null) try { br.close(); } catch (Throwable ignored) {}
+                        if (proc != null) try { proc.destroy(); } catch (Throwable ignored) {}
+                    }
+                    try { Thread.sleep(2000L); } catch (InterruptedException ignored) {}
+                }
+            }
+        }, "BtAtMonitor");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static void parseBtLogLine(String line) {
+        if (line == null || line.isEmpty()) return;
+        int newState = -99;
+        if (line.contains("[MU0]") || line.contains("[MU1]") || line.contains("[MU2]")
+            || line.contains("[MY]") || line.contains("a2dp连接状态: 0")) {
+            newState = BT_STATE_DISCONNECTED;
+        } else if (line.contains("[MU4]") || line.contains("[MB]")) {
+            newState = BT_STATE_PLAYING;
+        } else if (line.contains("[MU3]") || line.contains("[MA]")) {
+            newState = BT_STATE_PAUSED;
+        } else if (line.contains("a2dp连接状态: 1")) {
+            if (btA2dpState <= BT_STATE_DISCONNECTED) {
+                newState = BT_STATE_PAUSED;
+            }
+        }
+        if (newState != -99) {
+            int prev = btA2dpState;
+            btA2dpState = newState;
+            btLastEventMs = System.currentTimeMillis();
+            if (newState == BT_STATE_DISCONNECTED) {
+                btTitle = "";
+                btArtist = "";
+                btAlbum = "";
+                btPosMs = 0L;
+                btDurMs = 0L;
+            }
+            if (prev != newState) {
+                Log.i(TAG, "BT A2DP state changed: " + prev + " -> " + newState + " (" + line.trim() + ")");
+            }
+            return;
+        }
+
+        // Parse track metadata directly from [MI<title>\uFFFD<artist>\uFFFD<album>\uFFFD<dur>...]
+        int miStart = line.indexOf("[MI");
+        if (miStart >= 0) {
+            int miEnd = line.indexOf(']', miStart + 3);
+            if (miEnd > miStart + 3) {
+                String payload = line.substring(miStart + 3, miEnd);
+                String[] parts = payload.split("\ufffd", -1);
+                if (parts.length >= 1) {
+                    String title = parts[0].trim();
+                    String artist = parts.length >= 2 ? parts[1].trim() : "";
+                    String album = parts.length >= 3 ? parts[2].trim() : "";
+                    long dur = 0L;
+                    if (parts.length >= 4) {
+                        try { dur = Long.parseLong(parts[3].trim()); } catch (Throwable ignored) {}
+                    }
+                    if (!title.isEmpty()) {
+                        btTitle = title;
+                        btArtist = !artist.isEmpty() ? artist : album;
+                        btAlbum = album;
+                        if (dur > 0) btDurMs = dur;
+                        btLastEventMs = System.currentTimeMillis();
+                    }
+                }
+            }
+            return;
+        }
+
+        // Parse playback position & duration from [MT<8-digit posMs><8-digit durMs>]
+        int mtStart = line.indexOf("[MT");
+        if (mtStart >= 0) {
+            int mtEnd = line.indexOf(']', mtStart + 3);
+            if (mtEnd >= mtStart + 19) {
+                String digits = line.substring(mtStart + 3, mtEnd).trim();
+                if (digits.length() >= 16) {
+                    try {
+                        long pos = Long.parseLong(digits.substring(0, 8));
+                        long dur = Long.parseLong(digits.substring(8, 16));
+                        if (btA2dpState > BT_STATE_DISCONNECTED) {
+                            btPosMs = Math.max(0L, pos);
+                            if (dur > 0L) btDurMs = dur;
+                            btLastEventMs = System.currentTimeMillis();
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            }
+        }
+    }
+
+    private static boolean writeBtAt(String atCmd) {
+        synchronized (btWriteLock) {
+            FileOutputStream fos = null;
+            try {
+                fos = new FileOutputStream(GOC_SERIAL_PATH);
+                byte[] bytes = (atCmd + "\r\n").getBytes(StandardCharsets.US_ASCII);
+                fos.write(bytes);
+                fos.flush();
+                Log.i(TAG, "Sent BT AT command: " + atCmd);
+                return true;
+            } catch (Throwable t) {
+                Log.w(TAG, "writeBtAt(" + atCmd + ") failed", t);
+                return false;
+            } finally {
+                if (fos != null) try { fos.close(); } catch (Throwable ignored) {}
+            }
+        }
+    }
+
+    private static boolean handleBtCmd(int cmd) {
+        if (cmd == BT_CMD_QUERY) {
+            btLastQueryMs = System.currentTimeMillis();
+            return writeBtAt("AT#MV");
+        }
+        // Never send playback AT commands if A2DP is known disconnected
+        if (btA2dpState == BT_STATE_DISCONNECTED) {
+            Log.i(TAG, "Ignoring BT cmd=" + cmd + " because A2DP is disconnected");
+            return false;
+        }
+        switch (cmd) {
+            case BT_CMD_PLAY:
+                return writeBtAt("AT#MS");
+            case BT_CMD_PAUSE:
+                return writeBtAt("AT#MB");
+            case BT_CMD_TOGGLE:
+                return writeBtAt("AT#MA");
+            case BT_CMD_NEXT:
+                return writeBtAt("AT#MD");
+            case BT_CMD_PREV:
+                return writeBtAt("AT#ME");
+            default:
+                return false;
         }
     }
 
@@ -330,6 +536,40 @@ public final class VdInputBridge {
                     data.enforceInterface(DESCRIPTOR);
                     final String pkg = data.readString();
                     uninstallPackage(pkg);
+                    return true;
+                } else if (code == TX_BT_CMD) {
+                    data.enforceInterface(DESCRIPTOR);
+                    int cmd = data.readInt();
+                    boolean ok = handleBtCmd(cmd);
+                    if (reply != null) {
+                        reply.writeNoException();
+                        reply.writeInt(ok ? 1 : 0);
+                    }
+                    return true;
+                } else if (code == TX_BT_STATE) {
+                    data.enforceInterface(DESCRIPTOR);
+                    if (btA2dpState == BT_STATE_UNKNOWN) {
+                        long now = System.currentTimeMillis();
+                        if (now - btLastQueryMs > 3000L) {
+                            btLastQueryMs = now;
+                            cmdExecutor.execute(new Runnable() {
+                                @Override
+                                public void run() {
+                                    writeBtAt("AT#MV");
+                                }
+                            });
+                        }
+                    }
+                    if (reply != null) {
+                        reply.writeNoException();
+                        reply.writeInt(btA2dpState);
+                        reply.writeLong(btLastEventMs);
+                        reply.writeString(btTitle);
+                        reply.writeString(btArtist);
+                        reply.writeString(btAlbum);
+                        reply.writeLong(btPosMs);
+                        reply.writeLong(btDurMs);
+                    }
                     return true;
                 }
             } finally {

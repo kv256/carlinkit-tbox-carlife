@@ -91,7 +91,7 @@ public class DockView extends LinearLayout {
 
         wifiIcon = new StatusVectorView(context, StatusVectorView.WIFI);
         btIcon = new StatusVectorView(context, StatusVectorView.BT);
-        statusRow.addView(wifiIcon, new LayoutParams(24, 24));
+        statusRow.addView(wifiIcon, new LayoutParams(26, 24));
         LayoutParams btLp = new LayoutParams(24, 24);
         btLp.leftMargin = 12;
         statusRow.addView(btIcon, btLp);
@@ -318,15 +318,19 @@ public class DockView extends LinearLayout {
             paint.setColor(color);
 
             if (kind == WIFI) {
+                // Crisp concentric 3-arc + round dot Wi-Fi symbol (CarPlay/SF-Symbols proportion)
+                float cx = s * 0.50f;
+                float cy = s * 0.77f;
                 paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(s * 0.105f);
-                // Outer arc
-                c.drawArc(new RectF(s * 0.08f, s * 0.18f, s * 0.92f, s * 1.02f), 225f, 90f, false, paint);
-                // Middle arc
-                c.drawArc(new RectF(s * 0.24f, s * 0.36f, s * 0.76f, s * 0.88f), 225f, 90f, false, paint);
-                // Center dot
+                paint.setStrokeWidth(s * 0.092f);
+                float r3 = s * 0.53f;
+                float r2 = s * 0.36f;
+                float r1 = s * 0.20f;
+                c.drawArc(new RectF(cx - r3, cy - r3, cx + r3, cy + r3), 226f, 88f, false, paint);
+                c.drawArc(new RectF(cx - r2, cy - r2, cx + r2, cy + r2), 226f, 88f, false, paint);
+                c.drawArc(new RectF(cx - r1, cy - r1, cx + r1, cy + r1), 226f, 88f, false, paint);
                 paint.setStyle(Paint.Style.FILL);
-                c.drawCircle(s * 0.50f, s * 0.78f, s * 0.08f, paint);
+                c.drawCircle(cx, cy, s * 0.072f, paint);
             } else {
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(s * 0.105f);

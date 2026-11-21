@@ -9,26 +9,19 @@ import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
-import android.graphics.Color;
 import android.net.ConnectivityManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
-import android.text.InputType;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.Log;
-import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
-import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.LinearLayout;
-import android.widget.ScrollView;
-import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.List;
@@ -97,6 +90,15 @@ public class LauncherActivity extends Activity {
             @Override
             public void onNavStateChanged(AMapBridge.NavState state) {
                 if (navWidgetView != null) navWidgetView.updateNavState(state);
+            }
+
+            @Override
+            public void onHomeCompanyNotSet(boolean isCompany) {
+                Toast.makeText(
+                    LauncherActivity.this,
+                    isCompany ? "高德地图未设置「公司」，请先在高德中设置" : "高德地图未设置「家」，请先在高德中设置",
+                    Toast.LENGTH_LONG
+                ).show();
             }
         });
         amapBridge.start();
@@ -271,13 +273,13 @@ public class LauncherActivity extends Activity {
             @Override
             public void onGoHomeClicked() {
                 openAppInViewport(AMapBridge.AMAP_PKG);
-                amapBridge.navigateHomeOrCompany(false, prefs);
+                amapBridge.navigateHomeOrCompany(false);
             }
 
             @Override
             public void onGoCompanyClicked() {
                 openAppInViewport(AMapBridge.AMAP_PKG);
-                amapBridge.navigateHomeOrCompany(true, prefs);
+                amapBridge.navigateHomeOrCompany(true);
             }
 
             @Override
@@ -295,13 +297,7 @@ public class LauncherActivity extends Activity {
                     }
                 }, 600L);
             }
-
-            @Override
-            public void onNavSettingsClicked() {
-                showNavAddressDialog();
-            }
         });
-        navWidgetView.refreshCustomLabels(prefs);
         FrameLayout.LayoutParams navLp = new FrameLayout.LayoutParams(rightW, rightCardH);
         navLp.leftMargin = rightLeft;
         navLp.topMargin = padTop;
@@ -481,78 +477,10 @@ public class LauncherActivity extends Activity {
             .show();
     }
 
-    private void showNavAddressDialog() {
-        ScrollView scroll = new ScrollView(this);
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(36, 20, 36, 12);
-
-        TextView tip = new TextView(this);
-        tip.setText("留空坐标时，将直接使用高德车机版内已保存的「家 / 公司」地址一键导航。\n如需指定经纬度（GCJ-02），可在此填写：");
-        tip.setTextColor(0xFFCBD5E1);
-        tip.setPadding(0, 0, 0, 16);
-        box.addView(tip);
-
-        final EditText etHomeName = makeField(box, "家的名称（选填）", prefs.getHomeName(), InputType.TYPE_CLASS_TEXT);
-        final EditText etHomeLat = makeField(box, "家的纬度 Lat（留空用高德默认）",
-            Double.isNaN(prefs.getHomeLat()) ? "" : String.valueOf(prefs.getHomeLat()),
-            InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
-        final EditText etHomeLon = makeField(box, "家的经度 Lon（留空用高德默认）",
-            Double.isNaN(prefs.getHomeLon()) ? "" : String.valueOf(prefs.getHomeLon()),
-            InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
-
-        final EditText etCompName = makeField(box, "公司名称（选填）", prefs.getCompanyName(), InputType.TYPE_CLASS_TEXT);
-        final EditText etCompLat = makeField(box, "公司纬度 Lat（留空用高德默认）",
-            Double.isNaN(prefs.getCompanyLat()) ? "" : String.valueOf(prefs.getCompanyLat()),
-            InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
-        final EditText etCompLon = makeField(box, "公司经度 Lon（留空用高德默认）",
-            Double.isNaN(prefs.getCompanyLon()) ? "" : String.valueOf(prefs.getCompanyLon()),
-            InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
-
-        scroll.addView(box);
-        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-            .setTitle("回家 / 去公司 快捷导航设置")
-            .setView(scroll)
-            .setPositiveButton("保存", new DialogInterface.OnClickListener() {
-                @Override
-                public void onClick(DialogInterface d, int w) {
-                    prefs.setHomeOverride(etHomeName.getText().toString(),
-                        etHomeLat.getText().toString(), etHomeLon.getText().toString());
-                    prefs.setCompanyOverride(etCompName.getText().toString(),
-                        etCompLat.getText().toString(), etCompLon.getText().toString());
-                    navWidgetView.refreshCustomLabels(prefs);
-                    Toast.makeText(LauncherActivity.this, "已保存快捷导航配置", Toast.LENGTH_SHORT).show();
-                }
-            })
-            .setNeutralButton("恢复用高德默认", new DialogInterface.OnClickListener() {
-                @Override
-                public void onClick(DialogInterface d, int w) {
-                    prefs.setHomeOverride("", "", "");
-                    prefs.setCompanyOverride("", "", "");
-                    navWidgetView.refreshCustomLabels(prefs);
-                    Toast.makeText(LauncherActivity.this, "已恢复使用高德车机版默认家/公司", Toast.LENGTH_SHORT).show();
-                }
-            })
-            .setNegativeButton("取消", null)
-            .show();
-    }
-
-    private EditText makeField(LinearLayout parent, String hint, String value, int inputType) {
-        EditText et = new EditText(this);
-        et.setHint(hint);
-        et.setText(value);
-        et.setInputType(inputType);
-        et.setTextColor(Color.WHITE);
-        et.setHintTextColor(0xFF94A3B8);
-        parent.addView(et);
-        return et;
-    }
-
     private void showLauncherSettingsDialog() {
         String auto = prefs.getAutoLaunchPackage();
         String autoLabel = TextUtils.isEmpty(auto) ? "显示应用网格" : UiUtil.getAppLabel(this, auto);
         String[] items = new String[]{
-            "设置「回家 / 去公司」地址",
             "开机默认主区：" + autoLabel + "（点击切换为应用网格 / 高德）",
             "打开 USB / 音频切换工具 (TboxUsbSwitch)",
             "打开系统设置"
@@ -563,8 +491,6 @@ public class LauncherActivity extends Activity {
                 @Override
                 public void onClick(DialogInterface d, int which) {
                     if (which == 0) {
-                        showNavAddressDialog();
-                    } else if (which == 1) {
                         if (TextUtils.isEmpty(prefs.getAutoLaunchPackage())) {
                             prefs.setAutoLaunchPackage(AMapBridge.AMAP_PKG);
                             Toast.makeText(LauncherActivity.this, "开机默认打开：高德地图", Toast.LENGTH_SHORT).show();
@@ -572,9 +498,9 @@ public class LauncherActivity extends Activity {
                             prefs.setAutoLaunchPackage("");
                             Toast.makeText(LauncherActivity.this, "开机默认显示：应用抽屉", Toast.LENGTH_SHORT).show();
                         }
-                    } else if (which == 2) {
+                    } else if (which == 1) {
                         openAppInViewport("com.tbox.usbswitch");
-                    } else if (which == 3) {
+                    } else if (which == 2) {
                         openAppInViewport("com.android.settings");
                     }
                 }

@@ -87,3 +87,36 @@ fi
 "$BT/apksigner" verify --verbose "$OUT_APK" >/dev/null
 ls -lh "$OUT_APK"
 sha256sum "$OUT_APK"
+
+# 6. Build static RRO overlay to completely disable OEM left-edge NavigationBar
+OVL_DIR="$DIR/overlay-nonavbar"
+OVL_BUILD="$BUILD/overlay-nonavbar"
+OUT_OVL="$BUILD/TboxNoNavBarOverlay.apk"
+if [ -d "$OVL_DIR" ]; then
+  mkdir -p "$OVL_BUILD"
+  "$BT/aapt2" compile --dir "$OVL_DIR/res" -o "$OVL_BUILD/res.zip"
+  "$BT/aapt2" link \
+    -o "$OVL_BUILD/unsigned.apk" \
+    -I "$ANDROID_JAR" \
+    --manifest "$OVL_DIR/AndroidManifest.xml" \
+    --min-sdk-version 28 \
+    --target-sdk-version 28 \
+    --no-resource-deduping \
+    -0 arsc \
+    "$OVL_BUILD/res.zip"
+  "$BT/zipalign" -f -p 4 "$OVL_BUILD/unsigned.apk" "$OVL_BUILD/aligned.apk"
+  "$BT/apksigner" sign \
+    --ks "$KEYSTORE" \
+    --ks-key-alias usbswitch \
+    --ks-pass pass:tboxusbswitch \
+    --key-pass pass:tboxusbswitch \
+    --min-sdk-version 24 \
+    --v1-signing-enabled true \
+    --v2-signing-enabled true \
+    --v3-signing-enabled false \
+    --out "$OUT_OVL" \
+    "$OVL_BUILD/aligned.apk"
+  "$BT/apksigner" verify --verbose "$OUT_OVL" >/dev/null
+  ls -lh "$OUT_OVL"
+  sha256sum "$OUT_OVL"
+fi

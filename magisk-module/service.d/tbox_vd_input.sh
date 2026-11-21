@@ -11,12 +11,9 @@
   settings put global hidden_api_policy_p_apps 1 >/dev/null 2>&1 || true
   settings put global hidden_api_policy_pre_p_apps 1 >/dev/null 2>&1 || true
 
-  # Completely remove OEM left-edge NavigationBar (SdNavigationBarView) so left-edge hover/swipe never shows it
+  # Reinforce OEM left-edge NavigationBar suppression (paired with TboxNoNavBarOverlay.apk)
   setprop persist.suding.hasnavibar false >/dev/null 2>&1 || true
   resetprop qemu.hw.mainkeys 1 >/dev/null 2>&1 || true
-  if dumpsys window windows 2>/dev/null | grep -q "NavigationBar"; then
-    killall com.android.systemui >/dev/null 2>&1 || true
-  fi
 
   while true; do
     APK="$(pm path com.tbox.carlauncher 2>/dev/null | head -n 1 | sed 's/^package://')"

@@ -30,7 +30,6 @@ public class NavWidgetView extends FrameLayout {
         void onGoCompanyClicked();
         void onOpenMapClicked();
         void onSearchClicked();
-        void onNavSettingsClicked();
     }
 
     private final Callbacks callbacks;
@@ -39,8 +38,6 @@ public class NavWidgetView extends FrameLayout {
 
     // Idle views
     private final TextView tvDate;
-    private final TextView tvHomeSub;
-    private final TextView tvCompanySub;
 
     // Active nav views
     private final ManeuverIconView maneuverIcon;
@@ -82,17 +79,6 @@ public class NavWidgetView extends FrameLayout {
         tvBadge.setBackground(UiUtil.solidRounded(0x1C38BDF8, 14f, 0, 0));
         header.addView(tvBadge);
 
-        View gearBtn = makeSmallIconBtn(context, ICON_GEAR);
-        gearBtn.setOnClickListener(new OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (callbacks != null) callbacks.onNavSettingsClicked();
-            }
-        });
-        LinearLayout.LayoutParams gearLp = new LinearLayout.LayoutParams(42, 42);
-        gearLp.leftMargin = 10;
-        header.addView(gearBtn, gearLp);
-
         idleRoot.addView(header, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
         // Middle: Two prominent quick-nav buttons ("回家" & "去公司")
@@ -102,10 +88,9 @@ public class NavWidgetView extends FrameLayout {
         rowLp.topMargin = 16;
         rowLp.bottomMargin = 14;
 
-        tvHomeSub = new TextView(context);
         View homeCard = makeQuickDestCard(
-            context, "回家", tvHomeSub, "一键开始导航",
-            0xFF1A4073, 0xFF11284A, 0, ICON_HOME,
+            context, "回家",
+            0xFF1A4073, 0xFF11284A, ICON_HOME,
             new OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -117,10 +102,9 @@ public class NavWidgetView extends FrameLayout {
         leftCardLp.rightMargin = 8;
         btnRow.addView(homeCard, leftCardLp);
 
-        tvCompanySub = new TextView(context);
         View companyCard = makeQuickDestCard(
-            context, "去公司", tvCompanySub, "一键开始导航",
-            0xFF563616, 0xFF36210C, 0, ICON_WORK,
+            context, "去公司",
+            0xFF563616, 0xFF36210C, ICON_WORK,
             new OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -271,13 +255,6 @@ public class NavWidgetView extends FrameLayout {
         tvDate.setText(fmt.format(new Date()));
     }
 
-    public void refreshCustomLabels(LauncherPrefs prefs) {
-        String h = prefs.getHomeName();
-        String c = prefs.getCompanyName();
-        tvHomeSub.setText(TextUtils.isEmpty(h) ? "高德一键回家" : h);
-        tvCompanySub.setText(TextUtils.isEmpty(c) ? "高德一键去公司" : c);
-    }
-
     public void updateNavState(AMapBridge.NavState s) {
         if (s == null || !s.navigating) {
             activeRoot.setVisibility(GONE);
@@ -317,19 +294,19 @@ public class NavWidgetView extends FrameLayout {
         routeProgress.setProgress(progress);
     }
 
-    private View makeQuickDestCard(Context ctx, String title, TextView subView, String defaultSub,
-                                   int topColor, int botColor, int borderColor, int iconKind,
+    private View makeQuickDestCard(Context ctx, String title,
+                                   int topColor, int botColor, int iconKind,
                                    OnClickListener click) {
         LinearLayout card = new LinearLayout(ctx);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setGravity(Gravity.CENTER_VERTICAL);
-        card.setPadding(20, 16, 18, 16);
-        card.setBackground(UiUtil.cardDrawable(topColor, botColor, 20f, borderColor, borderColor != 0 ? 1 : 0));
+        card.setGravity(Gravity.CENTER);
+        card.setPadding(20, 16, 20, 16);
+        card.setBackground(UiUtil.cardDrawable(topColor, botColor, 20f, 0, 0));
         card.setOnClickListener(click);
         UiUtil.addPressScale(card);
 
         View icon = new SimpleVectorIcon(ctx, iconKind, 0xFFFFFFFF);
-        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(44, 44);
+        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(48, 48);
         iconLp.bottomMargin = 14;
         card.addView(icon, iconLp);
 
@@ -338,16 +315,8 @@ public class NavWidgetView extends FrameLayout {
         tvTitle.setTextColor(0xFFFFFFFF);
         tvTitle.setTextSize(TypedValue.COMPLEX_UNIT_PX, 28f);
         tvTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        tvTitle.setGravity(Gravity.CENTER);
         card.addView(tvTitle);
-
-        subView.setText(defaultSub);
-        subView.setTextColor(0xB3E2E8F0);
-        subView.setTextSize(TypedValue.COMPLEX_UNIT_PX, 17f);
-        subView.setSingleLine(true);
-        subView.setEllipsize(TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        subLp.topMargin = 4;
-        card.addView(subView, subLp);
 
         return card;
     }
@@ -365,19 +334,8 @@ public class NavWidgetView extends FrameLayout {
         return tv;
     }
 
-    private View makeSmallIconBtn(Context ctx, int kind) {
-        FrameLayout f = new FrameLayout(ctx);
-        f.setBackground(UiUtil.solidRounded(0x1EFFFFFF, 12f, 0, 0));
-        f.setPadding(9, 9, 9, 9);
-        f.addView(new SimpleVectorIcon(ctx, kind, 0xFFCBD5E1),
-            new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
-        UiUtil.addPressScale(f);
-        return f;
-    }
-
     static final int ICON_HOME = 1;
     static final int ICON_WORK = 2;
-    static final int ICON_GEAR = 3;
 
     private static final class SimpleVectorIcon extends View {
         private final int kind;
@@ -422,18 +380,6 @@ public class NavWidgetView extends FrameLayout {
                 RectF handle = new RectF(s * 0.35f, s * 0.18f, s * 0.65f, s * 0.34f);
                 c.drawRoundRect(handle, s * 0.06f, s * 0.06f, paint);
                 c.drawLine(s * 0.16f, s * 0.54f, s * 0.84f, s * 0.54f, paint);
-            } else if (kind == ICON_GEAR) {
-                paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(s * 0.11f);
-                c.drawCircle(s * 0.5f, s * 0.5f, s * 0.24f, paint);
-                for (int i = 0; i < 6; i++) {
-                    double a = Math.toRadians(i * 60);
-                    float x1 = (float) (s * 0.5 + Math.cos(a) * s * 0.32);
-                    float y1 = (float) (s * 0.5 + Math.sin(a) * s * 0.32);
-                    float x2 = (float) (s * 0.5 + Math.cos(a) * s * 0.43);
-                    float y2 = (float) (s * 0.5 + Math.sin(a) * s * 0.43);
-                    c.drawLine(x1, y1, x2, y2, paint);
-                }
             }
             c.restore();
         }

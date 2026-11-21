@@ -4,14 +4,18 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.TextUtils;
 import android.util.Log;
 
 /**
- * Standard AMapAuto (com.autonavi.amapauto) Broadcast Protocol v2/v3 bridge.
- * Listens to AUTONAVI_STANDARD_BROADCAST_SEND for real-time turn-by-turn guide info (KEY_TYPE=10001)
- * and state changes (KEY_TYPE=10019), and sends AUTONAVI_STANDARD_BROADCAST_RECV for Home/Company/Search.
+ * Standard AMapAuto (com.autonavi.amapauto) Broadcast Protocol bridge.
+ * - Listens to AUTONAVI_STANDARD_BROADCAST_SEND for real-time turn-by-turn guide info (KEY_TYPE=10001),
+ *   state changes (KEY_TYPE=10019), and Home/Company query replies (KEY_TYPE=10046).
+ * - Automatically uses AMapAuto's built-in Home/Company (KEY_TYPE=10045 query + KEY_TYPE=10040 navigate),
+ *   and prompts the user to configure Home/Company inside AMapAuto if not yet set.
  */
 public final class AMapBridge {
     private static final String TAG = "TboxAMapBridge";
@@ -21,10 +25,11 @@ public final class AMapBridge {
 
     public static final int KEY_GUIDE_INFO = 10001;
     public static final int KEY_APP_STATE = 10019;
-    public static final int KEY_OPEN_MAP = 10034;
     public static final int KEY_SEARCH = 10036;
-    public static final int KEY_DIRECT_NAVI = 10038;
     public static final int KEY_GO_HOME_COMPANY = 10040;
+    public static final int KEY_QUERY_HOME_COMPANY = 10045;
+    public static final int KEY_RESULT_HOME_COMPANY = 10046;
+    public static final int KEY_RESULT_REQUEST = 12005;
 
     private static final long GUIDE_STALE_MS = 20_000L;
 
@@ -44,6 +49,7 @@ public final class AMapBridge {
 
     public interface Listener {
         void onNavStateChanged(NavState state);
+        void onHomeCompanyNotSet(boolean isCompany);
     }
 
     private final Context ctx;
@@ -51,6 +57,20 @@ public final class AMapBridge {
     private final Listener listener;
     private final NavState state = new NavState();
     private boolean registered = false;
+
+    // Pending one-click Home/Company request awaiting KEY_TYPE=10046 confirmation
+    private int pendingDestType = 0; // 0=none, 1=home, 2=company
+    private final Runnable pendingFallbackNav = new Runnable() {
+        @Override
+        public void run() {
+            int dest = pendingDestType;
+            pendingDestType = 0;
+            if (dest == 1 || dest == 2) {
+                Log.i(TAG, "No 10046 reply within timeout, sending 10040 directly dest=" + (dest == 2 ? 1 : 0));
+                sendGoHomeCompanyBroadcast(dest == 2);
+            }
+        }
+    };
 
     private final Runnable staleCheck = new Runnable() {
         @Override
@@ -71,6 +91,13 @@ public final class AMapBridge {
                 handleGuideInfo(intent);
             } else if (keyType == KEY_APP_STATE) {
                 handleAppState(intent);
+            } else if (keyType == KEY_RESULT_HOME_COMPANY) {
+                handleHomeCompanyResult(intent);
+            } else if (keyType == KEY_RESULT_REQUEST) {
+                handleRequestResult(intent);
+            } else if (keyType != -1 && keyType != 12205 && keyType != 60021 && keyType != 13022) {
+                Bundle extras = intent.getExtras();
+                Log.d(TAG, "AMapAuto SEND KEY_TYPE=" + keyType + " extras=" + (extras != null ? extras.toString() : "null"));
             }
         }
     };
@@ -90,6 +117,8 @@ public final class AMapBridge {
     public void stop() {
         if (!registered) return;
         handler.removeCallbacks(staleCheck);
+        handler.removeCallbacks(pendingFallbackNav);
+        pendingDestType = 0;
         try { ctx.unregisterReceiver(receiver); } catch (Throwable ignored) {}
         registered = false;
     }
@@ -139,6 +168,37 @@ public final class AMapBridge {
         }
     }
 
+    private void handleHomeCompanyResult(Intent i) {
+        Bundle b = i.getExtras();
+        Log.i(TAG, "AMapAuto 10046 result: " + (b != null ? b.toString() : "null"));
+        int extraType = i.getIntExtra("EXTRA_TYPE", pendingDestType);
+        String poiName = i.getStringExtra("POINAME");
+        String address = i.getStringExtra("ADDRESS");
+        double lat = i.getDoubleExtra("LAT", 0.0);
+        double lon = i.getDoubleExtra("LON", 0.0);
+        boolean hasCoord = (Math.abs(lat) > 0.0001 || Math.abs(lon) > 0.0001);
+        boolean isConfigured = hasCoord || !TextUtils.isEmpty(poiName) || !TextUtils.isEmpty(address);
+
+        if (pendingDestType != 0 && (extraType == pendingDestType || extraType <= 0)) {
+            final boolean isCompany = (pendingDestType == 2);
+            pendingDestType = 0;
+            handler.removeCallbacks(pendingFallbackNav);
+            if (isConfigured) {
+                sendGoHomeCompanyBroadcast(isCompany);
+            } else {
+                Log.i(TAG, "AMapAuto Home/Company not set (isCompany=" + isCompany + ")");
+                if (listener != null) {
+                    handler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            listener.onHomeCompanyNotSet(isCompany);
+                        }
+                    });
+                }
+            }
+        }
+    }
+
     public void clearNav() {
         handler.removeCallbacks(staleCheck);
         state.navigating = false;
@@ -163,41 +223,58 @@ public final class AMapBridge {
         }
     }
 
-    /**
-     * Trigger AMapAuto navigation to Home (dest=0) or Company (dest=1).
-     * Uses custom coordinate override (KEY_TYPE=10038) if configured in LauncherPrefs;
-     * otherwise uses AMapAuto's built-in saved Home/Company via KEY_TYPE=10040.
-     */
-    public void navigateHomeOrCompany(final boolean isCompany, LauncherPrefs prefs) {
-        double lat = isCompany ? prefs.getCompanyLat() : prefs.getHomeLat();
-        double lon = isCompany ? prefs.getCompanyLon() : prefs.getHomeLon();
-        String name = isCompany ? prefs.getCompanyName() : prefs.getHomeName();
+    private boolean lastRequestedCompany = false;
+    private long lastRequestTimeMs = 0L;
 
+    private void handleRequestResult(Intent i) {
+        boolean ok = i.getBooleanExtra("EXTRA_REQUEST_RESULT", true);
+        int reqId = i.getIntExtra("EXTRA_REQUEST_ID", -1);
+        Log.i(TAG, "AMapAuto 12005 result: ok=" + ok + " reqId=" + reqId);
+        if (!ok && (System.currentTimeMillis() - lastRequestTimeMs < 5000L)) {
+            final boolean isComp = lastRequestedCompany;
+            if (listener != null) {
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        listener.onHomeCompanyNotSet(isComp);
+                    }
+                });
+            }
+        }
+    }
+
+    /**
+     * Automatically reads AMapAuto's saved Home (isCompany=false) or Company (isCompany=true).
+     * Queries KEY_TYPE=10045 & triggers KEY_TYPE=10040; if AMapAuto reports unset via
+     * KEY_TYPE=10046 or KEY_TYPE=12005 (EXTRA_REQUEST_RESULT=false), prompts the user
+     * to configure Home/Company inside AMapAuto.
+     */
+    public void navigateHomeOrCompany(final boolean isCompany) {
+        handler.removeCallbacks(pendingFallbackNav);
+        pendingDestType = isCompany ? 2 : 1;
+        lastRequestedCompany = isCompany;
+        lastRequestTimeMs = System.currentTimeMillis();
+
+        Intent q = new Intent(ACTION_RECV);
+        q.setPackage(AMAP_PKG);
+        q.putExtra("SOURCE_APP", "TboxCarLauncher");
+        q.putExtra("KEY_TYPE", KEY_QUERY_HOME_COMPANY);
+        q.putExtra("EXTRA_TYPE", pendingDestType); // 1=Home, 2=Company
+        ctx.sendBroadcast(q);
+
+        // If AMapAuto doesn't answer 10045 with 10046 within 350ms, trigger 10040 directly
+        handler.postDelayed(pendingFallbackNav, 350L);
+    }
+
+    private void sendGoHomeCompanyBroadcast(boolean isCompany) {
         final Intent b = new Intent(ACTION_RECV);
         b.setPackage(AMAP_PKG);
         b.putExtra("SOURCE_APP", "TboxCarLauncher");
-
-        if (!Double.isNaN(lat) && !Double.isNaN(lon)) {
-            b.putExtra("KEY_TYPE", KEY_DIRECT_NAVI);
-            b.putExtra("POINAME", (name == null || name.isEmpty()) ? (isCompany ? "公司" : "家") : name);
-            b.putExtra("LAT", lat);
-            b.putExtra("LON", lon);
-            b.putExtra("DEV", 0);
-            b.putExtra("STYLE", 0);
-        } else {
-            b.putExtra("KEY_TYPE", KEY_GO_HOME_COMPANY);
-            b.putExtra("DEST", isCompany ? 1 : 0);
-            b.putExtra("IS_START_NAVI", 0); // 0 = direct start navigation
-            b.putExtra("EXTRA_DEV", 0);
-        }
-        // Send immediately and once more after 1.2s in case AMapAuto is cold-starting
+        b.putExtra("KEY_TYPE", KEY_GO_HOME_COMPANY);
+        b.putExtra("DEST", isCompany ? 1 : 0);
+        b.putExtra("IS_START_NAVI", 0); // 0 = direct start navigation
+        b.putExtra("EXTRA_DEV", 0);
         ctx.sendBroadcast(b);
-        handler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                ctx.sendBroadcast(b);
-            }
-        }, 1200L);
     }
 
     public void openSearch() {

@@ -82,14 +82,14 @@
 
 ---
 
-## 4.5 CarPlay 风格车机桌面（`tbox-car-launcher` v1.1）
+## 4.5 CarPlay 风格车机桌面（`tbox-car-launcher` v1.2）
 
-- 包名：`com.tbox.carlauncher`（通过 Magisk 非破坏性挂载至 `/system/priv-app/TboxCarLauncher/TboxCarLauncher.apk`，配套 `/system/etc/permissions/privapp-permissions-tboxcarlauncher.xml` 与开机伴生桥 `/data/adb/service.d/tbox_vd_input.sh`；停用系统原生 `com.android.launcher3` 并开机自动清除左侧 `NavigationBar` / `SdNavigationBarView`，左边缘滑入/悬停永不弹出原生 Dock）。
+- 包名：`com.tbox.carlauncher`（通过 Magisk 非破坏性挂载至 `/system/priv-app/TboxCarLauncher/TboxCarLauncher.apk`，配套 `/system/etc/permissions/privapp-permissions-tboxcarlauncher.xml`、静态 RRO 覆盖包 `/system/vendor/overlay/TboxNoNavBarOverlay.apk` 及开机伴生桥 `/data/adb/service.d/tbox_vd_input.sh`；停用系统原生 `com.android.launcher3` 并通过 RRO 将 `config_showNavigationBar=false` 且 `navigation_bar_width/height=0dp`，彻底根治原厂 `SystemUI` `refleshNavigationBar()` 在左边缘滑入时重建 `SdNavigationBarView` 的问题）。
 - **方案 B 精确 `1920 × 720` 浮岛分区（弱化边框 / 矢量图标）**：
-  - 左侧 Dock：`112 × 702`（数字时钟长按进设置、矢量 Wi-Fi/蓝牙连接图标、4 个长按可自定义快捷应用与激活指示条、底部精简为返回键 + 应用抽屉键「短按切换抽屉 / 长按唤醒语音助手」）；
+  - 左侧 Dock：`112 × 702`（数字时钟长按进设置、三弧同心矢量 Wi-Fi 与蓝牙连接图标、4 个长按可自定义快捷应用与激活指示条、底部精简为返回键 + 应用抽屉键「短按切换抽屉 / 长按唤醒语音助手」）；
   - 中间严格 16:9 主显示区：**`1248 × 702`**（`20px` 圆角微光边框；应用抽屉采用纯图标 `< / >` 翻页，长按第三方应用支持直接卸载）；
-  - 右上导航卡片：`512 × 345`（空闲态展示日期 + 无边框渐变「回家 / 去公司」一键高德导航 + 打开地图/搜目的地；高德车机版 `amapauto` 发出 `AUTONAVI_STANDARD_BROADCAST_SEND` `KEY_TYPE=10001` 后自动切换为矢量转向箭头 + 距离 + 路名 + 剩余里程/时间/ETA + 进度条）；
-  - 右下音乐卡片：`512 × 345`（封面动态取色渐变背景、歌名/歌手/来源角标、进度条与大尺寸播控；通过标准 `MediaBrowser` 主动连接 `com.carsyso.bluetooth/.BtMediaBrowserService` 激活蓝牙媒体会话，叠加 `com.carsyso.main` `media_report` 与 `MediaSessionManager` 仲裁，同时覆盖手机蓝牙音乐/视频与盒子本机播放）。
+  - 右上导航卡片：`512 × 345`（空闲态展示日期 + 极简居中「回家 / 去公司」按钮 + 打开地图/搜目的地；自动读取高德车机版内已保存的家/公司地址 `KEY_TYPE=10045/10040`，若高德未设置则通过 `10046/12005` 反馈并提示在高德中设置；导航开始后自动切换为矢量转向箭头 + 距离 + 路名 + 剩余里程/时间/ETA + 进度条）；
+  - 右下音乐卡片：`512 × 345`（封面动态取色渐变背景、歌名/歌手/来源角标、进度条与大尺寸播控；`VdInputBridge` 实时监听 `sdsdk816` 串口 AT 日志 `[MU0..4]/[MY]/[MA]/[MB]/[MI...]/[MT...]` 获取真实 A2DP 连接与曲目/进度状态，断连立即清空过期曲目并禁止假进度条推进；切歌/播放/暂停直接向 `/dev/goc_serial` 发送 `AT#MS/AT#MB/AT#MD/AT#ME`，彻底解决仅音乐模式 `HFP=0` 下原厂 `TechBTMusicManager` 拦截播控的问题，同时兼顾盒子本机媒体应用）。
 - **16:9 强约束与多点触控机制**：
   - 由 `uid=1000 (system)` 伴生 Binder 服务 `tbox_vd_bridge`（`VdInputBridge`）持有 `1248 × 702` `VirtualDisplay` 并通过 `InputManager.createInputForwarder(displayId)` 零延迟转发完整多点触控与返回键；
   - 全局 `TaskStackListener` 监听 Display 0，任何外部拉起或请求全屏的 App 都会被即时 `moveStackToDisplay` 迁入 `1248 × 702` 虚拟屏。

@@ -45,6 +45,7 @@ public final class MediaHub implements MediaNotificationListener.Callback, TechB
         public boolean hasSession;
 
         public long estimatedPositionMs() {
+            if (!hasSession) return 0L;
             if (durationMs <= 0) return Math.max(0, positionMs);
             long pos = positionMs;
             if (playing && positionUpdateTimeMs > 0) {
@@ -224,10 +225,18 @@ public final class MediaHub implements MediaNotificationListener.Callback, TechB
             }
         }
 
-        boolean btPlaying = btSnap != null && btSnap.playing;
-        boolean btHasInfo = btSnap != null && btSnap.a2dpConnected && !TextUtils.isEmpty(btSnap.title);
+        boolean btConnected = btSnap != null && btSnap.a2dpConnected;
+        boolean btPlaying = btConnected && btSnap.playing;
+        boolean btHasInfo = btConnected && !TextUtils.isEmpty(btSnap.title);
 
-        state.btA2dpConnected = btSnap != null && btSnap.a2dpConnected;
+        if (!btConnected && ("com.carsyso.bluetooth".equals(notifPkg) || "com.android.bluetooth".equals(notifPkg))) {
+            notifPkg = "";
+            notifTitle = "";
+            notifArtist = "";
+            notifArt = null;
+        }
+
+        state.btA2dpConnected = btConnected;
 
         // Priority:
         // 1. Phone BT music/video actively playing (unless a local box MediaController is also actively playing more recently)
@@ -370,8 +379,13 @@ public final class MediaHub implements MediaNotificationListener.Callback, TechB
 
     public void playPause() {
         if (state.isBluetoothSource || (activeController == null && isBtA2dpConnected())) {
-            boolean ok = state.playing ? btMusicClient.pause() : btMusicClient.play();
-            if (ok) return;
+            if (isBtA2dpConnected()) {
+                boolean ok = state.playing ? btMusicClient.pause() : btMusicClient.play();
+                if (ok) return;
+            }
+            // Do NOT fall through to global dispatchMediaKey when BT is disconnected
+            // (it triggers BtMediaBrowserService's broken fake STATE_PLAYING!)
+            if (activeController == null) return;
         }
         if (activeController != null) {
             try {
@@ -380,12 +394,15 @@ public final class MediaHub implements MediaNotificationListener.Callback, TechB
                 return;
             } catch (Throwable ignored) {}
         }
-        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
+        if (state.hasSession) {
+            dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
+        }
     }
 
     public void next() {
         if (state.isBluetoothSource || (activeController == null && isBtA2dpConnected())) {
-            if (btMusicClient.next()) return;
+            if (isBtA2dpConnected() && btMusicClient.next()) return;
+            if (activeController == null) return;
         }
         if (activeController != null) {
             try {
@@ -393,12 +410,15 @@ public final class MediaHub implements MediaNotificationListener.Callback, TechB
                 return;
             } catch (Throwable ignored) {}
         }
-        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_NEXT);
+        if (state.hasSession) {
+            dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_NEXT);
+        }
     }
 
     public void previous() {
         if (state.isBluetoothSource || (activeController == null && isBtA2dpConnected())) {
-            if (btMusicClient.previous()) return;
+            if (isBtA2dpConnected() && btMusicClient.previous()) return;
+            if (activeController == null) return;
         }
         if (activeController != null) {
             try {
@@ -406,7 +426,9 @@ public final class MediaHub implements MediaNotificationListener.Callback, TechB
                 return;
             } catch (Throwable ignored) {}
         }
-        dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PREVIOUS);
+        if (state.hasSession) {
+            dispatchMediaKey(KeyEvent.KEYCODE_MEDIA_PREVIOUS);
+        }
     }
 
     private void dispatchMediaKey(int keyCode) {

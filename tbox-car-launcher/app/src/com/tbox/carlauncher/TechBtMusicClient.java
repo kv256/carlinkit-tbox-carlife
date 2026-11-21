@@ -18,13 +18,20 @@ import android.os.RemoteException;
 import android.text.TextUtils;
 import android.util.Log;
 
+import java.lang.reflect.Method;
+
 /**
- * Connects to Tbox's Bluetooth music metadata & controls via two public, sanctioned channels:
- * 1) Standard Android MediaBrowser -> com.carsyso.bluetooth / BtMediaBrowserService
- *    (triggers BtMediaBrowserService to create its MediaSession fed directly by BTMusicManager,
- *    giving real-time title, artist, album, duration, position, play state & TransportControls!)
- * 2) com.carsyso.main.core.MainService ("media_report" -> IMainSdkMediaReportServer)
- *    as a secondary live source for BT music info (deviceType == 7) + mock media keys ("key").
+ * Connects to Tbox's Bluetooth music metadata & controls:
+ * 1) Metadata (title, artist, album, duration, position):
+ *    - Standard Android MediaBrowser -> com.carsyso.bluetooth / BtMediaBrowserService
+ *    - Secondary: com.carsyso.main.core.MainService ("media_report")
+ * 2) Authoritative A2DP connection/play state + transport controls (Play/Pause/Next/Prev):
+ *    - Via tbox_vd_bridge (VdInputBridge) monitoring sdsdk816 AT state ([MU0..4]/[MY]/[MA]/[MB])
+ *      and sending AT#MS/AT#MB/AT#MD/AT#ME to /dev/goc_serial.
+ *    - This solves BOTH OEM bugs in A2DP-only (HFP=0) phone-music mode:
+ *      (a) TechBTMusicManager refuses play/pause/next/prev when getHfpConnectState()!=1;
+ *      (b) BtMediaBrowserService never clears stale track metadata on phone disconnect and
+ *          unconditionally fakes STATE_PLAYING when TransportControls.play() is called.
  */
 public final class TechBtMusicClient {
     private static final String TAG = "TboxTechBtMusic";
@@ -37,7 +44,6 @@ public final class TechBtMusicClient {
     private static final String DESC_MAIN_SDK = "com.carsyso.main.aidl.sdk.IMainSdkAidlInterface";
     private static final String DESC_MEDIA_SRV = "com.carsyso.main.aidl.sdk.IMainSdkMediaReportServer";
     private static final String DESC_MEDIA_CB = "com.carsyso.main.aidl.sdk.IMainSdkMediaReportCallback";
-    private static final String DESC_KEY_SRV = "com.carsyso.main.aidl.sdk.IMainSdkKeyServer";
 
     public static final class BtMusicSnapshot {
         public boolean a2dpConnected;
@@ -63,19 +69,25 @@ public final class TechBtMusicClient {
     private MediaController btController;
 
     private IBinder mediaReportServer;
-    private IBinder keyServer;
+    private IBinder vdBridge;
     private final Binder mediaReportCb = new MediaReportCallbackBinder();
     private boolean mainBound = false;
     private boolean started = false;
 
+    // Authoritative A2DP state from VdInputBridge (-1=unknown, 0=disconnected, 1=paused, 2=playing)
+    private int bridgeBtState = VdInputBridge.BT_STATE_UNKNOWN;
+    private String lastTrackKey = "";
+
     private final MediaController.Callback controllerCallback = new MediaController.Callback() {
         @Override
         public void onPlaybackStateChanged(PlaybackState state) {
+            pollBridgeBtState();
             updateFromBtController();
         }
 
         @Override
         public void onMetadataChanged(MediaMetadata metadata) {
+            pollBridgeBtState();
             updateFromBtController();
         }
 
@@ -98,6 +110,7 @@ public final class TechBtMusicClient {
                     }
                     btController = new MediaController(ctx, token);
                     btController.registerCallback(controllerCallback, handler);
+                    pollBridgeBtState();
                     updateFromBtController();
                 }
             } catch (Throwable t) {
@@ -125,7 +138,6 @@ public final class TechBtMusicClient {
         public void onServiceConnected(ComponentName name, IBinder service) {
             Log.i(TAG, "Connected to com.carsyso.main.core.MainService");
             mediaReportServer = getMainBinder(service, "media_report");
-            keyServer = getMainBinder(service, "key");
             if (mediaReportServer != null) {
                 registerMediaReportCb();
                 inquireMediaInfo();
@@ -135,7 +147,6 @@ public final class TechBtMusicClient {
         @Override
         public void onServiceDisconnected(ComponentName name) {
             mediaReportServer = null;
-            keyServer = null;
         }
     };
 
@@ -147,6 +158,15 @@ public final class TechBtMusicClient {
         }
     };
 
+    private final Runnable btStatePoller = new Runnable() {
+        @Override
+        public void run() {
+            if (!started) return;
+            pollBridgeBtState();
+            handler.postDelayed(this, 1200L);
+        }
+    };
+
     public TechBtMusicClient(Context ctx, Listener listener) {
         this.ctx = ctx.getApplicationContext();
         this.listener = listener;
@@ -155,14 +175,17 @@ public final class TechBtMusicClient {
     public void start() {
         if (started) return;
         started = true;
+        pollBridgeBtState();
         connectMediaBrowser();
         bindMainService();
+        handler.postDelayed(btStatePoller, 1200L);
     }
 
     public void stop() {
         if (!started) return;
         started = false;
         handler.removeCallbacks(reconnectRunnable);
+        handler.removeCallbacks(btStatePoller);
         if (btController != null) {
             try { btController.unregisterCallback(controllerCallback); } catch (Throwable ignored) {}
             btController = null;
@@ -176,11 +199,131 @@ public final class TechBtMusicClient {
             mainBound = false;
         }
         mediaReportServer = null;
-        keyServer = null;
+        vdBridge = null;
     }
 
     public BtMusicSnapshot getSnapshot() {
         return snap;
+    }
+
+    private IBinder getVdBridge() {
+        if (vdBridge != null && vdBridge.isBinderAlive()) return vdBridge;
+        try {
+            Class<?> sm = Class.forName("android.os.ServiceManager");
+            Method get = sm.getDeclaredMethod("getService", String.class);
+            vdBridge = (IBinder) get.invoke(null, VdInputBridge.SERVICE_NAME);
+        } catch (Throwable ignored) {
+            vdBridge = null;
+        }
+        return vdBridge;
+    }
+
+    private void pollBridgeBtState() {
+        IBinder b = getVdBridge();
+        if (b == null) return;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
+            b.transact(VdInputBridge.TX_BT_STATE, data, reply, 0);
+            reply.readException();
+            int st = reply.readInt();
+            reply.readLong(); // lastEventMs
+            String title = cleanStr(reply.readString());
+            String artist = cleanStr(reply.readString());
+            String album = cleanStr(reply.readString());
+            long posMs = reply.readLong();
+            long durMs = reply.readLong();
+            applyBridgeBtState(st, title, artist, album, posMs, durMs);
+        } catch (Throwable ignored) {
+            vdBridge = null;
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+    }
+
+    private void applyBridgeBtState(int st, String bTitle, String bArtist, String bAlbum, long bPosMs, long bDurMs) {
+        int prev = bridgeBtState;
+        bridgeBtState = st;
+        if (st == VdInputBridge.BT_STATE_DISCONNECTED) {
+            boolean hadAnything = snap.a2dpConnected || snap.playing
+                || !TextUtils.isEmpty(snap.title) || snap.durationMs > 0 || snap.positionMs > 0;
+            clearSnapshot();
+            if (hadAnything || prev != st) {
+                Log.i(TAG, "BT A2DP disconnected -> cleared stale track info");
+                notifyListener();
+            }
+        } else if (st == VdInputBridge.BT_STATE_PAUSED || st == VdInputBridge.BT_STATE_PLAYING) {
+            boolean newPlaying = (st == VdInputBridge.BT_STATE_PLAYING);
+            boolean changed = (!snap.a2dpConnected) || (snap.playing != newPlaying);
+            snap.a2dpConnected = true;
+            snap.playing = newPlaying;
+
+            if (!TextUtils.isEmpty(bTitle) && !bTitle.equals(snap.title)) {
+                snap.title = bTitle;
+                snap.artist = bArtist;
+                snap.album = bAlbum;
+                lastTrackKey = bTitle + "|" + bArtist;
+                changed = true;
+            } else if (TextUtils.isEmpty(snap.artist) && !TextUtils.isEmpty(bArtist)) {
+                snap.artist = bArtist;
+                changed = true;
+            }
+            if (bDurMs > 0 && bDurMs != snap.durationMs) {
+                snap.durationMs = bDurMs;
+                changed = true;
+            }
+            if (bPosMs >= 0 && (newPlaying || snap.positionMs == 0L || Math.abs(bPosMs - snap.positionMs) > 2500L)) {
+                if (bPosMs != snap.positionMs) {
+                    snap.positionMs = bPosMs;
+                    changed = true;
+                }
+            }
+
+            if (prev <= VdInputBridge.BT_STATE_DISCONNECTED) {
+                snap.lastUpdateMs = System.currentTimeMillis();
+                updateFromBtController();
+                inquireMediaInfo();
+                notifyListener();
+            } else if (changed) {
+                snap.lastUpdateMs = System.currentTimeMillis();
+                notifyListener();
+            }
+        }
+    }
+
+    private void clearSnapshot() {
+        snap.a2dpConnected = false;
+        snap.playing = false;
+        snap.title = "";
+        snap.artist = "";
+        snap.album = "";
+        snap.positionMs = 0L;
+        snap.durationMs = 0L;
+        snap.lastUpdateMs = System.currentTimeMillis();
+        lastTrackKey = "";
+    }
+
+    private boolean sendBridgeBtCmd(int cmd) {
+        IBinder b = getVdBridge();
+        if (b == null) return false;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
+            data.writeInt(cmd);
+            b.transact(VdInputBridge.TX_BT_CMD, data, reply, 0);
+            reply.readException();
+            return reply.readInt() == 1;
+        } catch (Throwable t) {
+            Log.w(TAG, "sendBridgeBtCmd(" + cmd + ") failed", t);
+            vdBridge = null;
+            return false;
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
     }
 
     private void connectMediaBrowser() {
@@ -220,6 +363,15 @@ public final class TechBtMusicClient {
     }
 
     private void updateFromBtController() {
+        // Ignore stale BtMediaBrowserService metadata/state whenever phone A2DP is disconnected!
+        if (bridgeBtState == VdInputBridge.BT_STATE_DISCONNECTED) {
+            if (snap.a2dpConnected || snap.playing || !TextUtils.isEmpty(snap.title)) {
+                clearSnapshot();
+                notifyListener();
+            }
+            return;
+        }
+
         MediaController mc = btController;
         if (mc == null) return;
         MediaMetadata mm = mc.getMetadata();
@@ -231,50 +383,83 @@ public final class TechBtMusicClient {
         if (TextUtils.isEmpty(artist)) artist = album;
         long dur = mm != null ? Math.max(0L, mm.getLong(MediaMetadata.METADATA_KEY_DURATION)) : 0L;
 
-        boolean playing = (pb != null && pb.getState() == PlaybackState.STATE_PLAYING);
-        long pos = (pb != null && pb.getPosition() > 0) ? pb.getPosition() : snap.positionMs;
-
-        if (!TextUtils.isEmpty(title)) snap.title = title;
-        if (!TextUtils.isEmpty(artist)) snap.artist = artist;
-        if (!TextUtils.isEmpty(album)) snap.album = album;
-        if (dur > 0) snap.durationMs = dur;
-        snap.positionMs = pos;
-        snap.playing = playing;
-        if (playing || !TextUtils.isEmpty(snap.title)) {
+        // If bridge hasn't reported A2DP state yet (unknown), don't assume connected from stale paused metadata alone
+        boolean controllerPlaying = (pb != null && pb.getState() == PlaybackState.STATE_PLAYING);
+        if (bridgeBtState == VdInputBridge.BT_STATE_UNKNOWN) {
+            if (!controllerPlaying) {
+                return;
+            }
             snap.a2dpConnected = true;
+            snap.playing = true;
+        } else {
+            snap.a2dpConnected = true;
+            snap.playing = (bridgeBtState == VdInputBridge.BT_STATE_PLAYING);
+        }
+
+        String trackKey = title + "|" + artist;
+        boolean trackChanged = !TextUtils.isEmpty(title) && !trackKey.equals(lastTrackKey);
+        if (!TextUtils.isEmpty(title)) {
+            snap.title = title;
+            lastTrackKey = trackKey;
+        }
+        if (!TextUtils.isEmpty(artist)) {
+            snap.artist = artist;
+        } else if (trackChanged) {
+            snap.artist = "";
+        }
+        if (!TextUtils.isEmpty(album)) {
+            snap.album = album;
+        } else if (trackChanged) {
+            snap.album = "";
+        }
+        if (dur > 0) {
+            snap.durationMs = dur;
+        } else if (trackChanged) {
+            snap.durationMs = 0L;
+        }
+
+        if (pb != null && pb.getPosition() >= 0) {
+            if (snap.playing || trackChanged || snap.positionMs == 0L) {
+                snap.positionMs = pb.getPosition();
+            }
         }
         snap.lastUpdateMs = System.currentTimeMillis();
-        Log.i(TAG, "BT MediaController update: playing=" + playing + " title=" + snap.title
-            + " artist=" + snap.artist + " pos=" + snap.positionMs + "/" + snap.durationMs);
+        Log.i(TAG, "BT update: a2dp=" + snap.a2dpConnected + " playing=" + snap.playing
+            + " title=" + snap.title + " artist=" + snap.artist
+            + " pos=" + snap.positionMs + "/" + snap.durationMs);
         notifyListener();
     }
 
     public boolean play() {
-        if (btController != null) {
-            try { btController.getTransportControls().play(); return true; } catch (Throwable ignored) {}
+        pollBridgeBtState();
+        if (!snap.a2dpConnected || bridgeBtState == VdInputBridge.BT_STATE_DISCONNECTED) {
+            return false;
         }
-        return sendMockMediaKey(126) || sendMockMediaKey(85);
+        return sendBridgeBtCmd(VdInputBridge.BT_CMD_PLAY);
     }
 
     public boolean pause() {
-        if (btController != null) {
-            try { btController.getTransportControls().pause(); return true; } catch (Throwable ignored) {}
+        pollBridgeBtState();
+        if (!snap.a2dpConnected || bridgeBtState == VdInputBridge.BT_STATE_DISCONNECTED) {
+            return false;
         }
-        return sendMockMediaKey(127) || sendMockMediaKey(85);
+        return sendBridgeBtCmd(VdInputBridge.BT_CMD_PAUSE);
     }
 
     public boolean next() {
-        if (btController != null) {
-            try { btController.getTransportControls().skipToNext(); return true; } catch (Throwable ignored) {}
+        pollBridgeBtState();
+        if (!snap.a2dpConnected || bridgeBtState == VdInputBridge.BT_STATE_DISCONNECTED) {
+            return false;
         }
-        return sendMockMediaKey(87);
+        return sendBridgeBtCmd(VdInputBridge.BT_CMD_NEXT);
     }
 
     public boolean previous() {
-        if (btController != null) {
-            try { btController.getTransportControls().skipToPrevious(); return true; } catch (Throwable ignored) {}
+        pollBridgeBtState();
+        if (!snap.a2dpConnected || bridgeBtState == VdInputBridge.BT_STATE_DISCONNECTED) {
+            return false;
         }
-        return sendMockMediaKey(88);
+        return sendBridgeBtCmd(VdInputBridge.BT_CMD_PREV);
     }
 
     private IBinder getMainBinder(IBinder mainSdk, String name) {
@@ -331,28 +516,6 @@ public final class TechBtMusicClient {
         }
     }
 
-    private boolean sendMockMediaKey(int keyCode) {
-        IBinder srv = keyServer;
-        if (srv == null || !srv.isBinderAlive()) return false;
-        Parcel data = Parcel.obtain();
-        Parcel reply = Parcel.obtain();
-        try {
-            data.writeInterfaceToken(DESC_KEY_SRV);
-            data.writeString(ctx.getPackageName());
-            data.writeInt(keyCode);
-            data.writeInt(1); // ACTION_UP
-            srv.transact(5, data, reply, 0);
-            reply.readException();
-            return true;
-        } catch (Throwable t) {
-            Log.w(TAG, "sendMockMediaKey(" + keyCode + ") failed", t);
-            return false;
-        } finally {
-            data.recycle();
-            reply.recycle();
-        }
-    }
-
     private final class MediaReportCallbackBinder extends Binder {
         @Override
         protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
@@ -364,7 +527,10 @@ public final class TechBtMusicClient {
                 if (reply != null) reply.writeNoException();
                 Log.i(TAG, "MainService media_report: mediaType=" + mediaType + " deviceType=" + deviceType
                     + " info=" + (info != null ? java.util.Arrays.toString(info) : "null"));
-                if (deviceType == 7 && info != null && info.length > 0) {
+                if (bridgeBtState == VdInputBridge.BT_STATE_DISCONNECTED) {
+                    return true;
+                }
+                if (deviceType == 7 && info != null && info.length > 0 && snap.a2dpConnected) {
                     String title = cleanStr(info[0]);
                     String artist = info.length > 1 ? cleanStr(info[1]) : "";
                     String album = info.length > 2 ? cleanStr(info[2]) : "";
@@ -372,8 +538,6 @@ public final class TechBtMusicClient {
                         snap.title = title;
                         snap.artist = !TextUtils.isEmpty(artist) ? artist : album;
                         snap.album = album;
-                        snap.a2dpConnected = true;
-                        snap.playing = true;
                         snap.lastUpdateMs = System.currentTimeMillis();
                         notifyListener();
                     }
