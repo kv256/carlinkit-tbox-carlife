@@ -70,6 +70,7 @@ public final class MediaHub implements MediaNotificationListener.Callback, TechB
     private final AudioManager audioManager;
     private final MediaSessionManager sessionManager;
     private final TechBtMusicClient btMusicClient;
+    private final AlbumArtFetcher albumArtFetcher;
     private final List<MediaController> tracked = new ArrayList<MediaController>();
     private MediaController activeController;
 
@@ -125,6 +126,7 @@ public final class MediaHub implements MediaNotificationListener.Callback, TechB
         this.audioManager = (AudioManager) this.ctx.getSystemService(Context.AUDIO_SERVICE);
         this.sessionManager = (MediaSessionManager) this.ctx.getSystemService(Context.MEDIA_SESSION_SERVICE);
         this.btMusicClient = new TechBtMusicClient(this.ctx, this);
+        this.albumArtFetcher = new AlbumArtFetcher(this.ctx);
     }
 
     public void start() {
@@ -269,6 +271,7 @@ public final class MediaHub implements MediaNotificationListener.Callback, TechB
             state.positionUpdateTimeMs = 0L;
         } else {
             activeController = null;
+            activeArtTrackKey = "";
             state.hasSession = false;
             state.isBluetoothSource = state.btA2dpConnected;
             state.packageName = state.btA2dpConnected ? "com.carsyso.bluetooth" : "";
@@ -285,6 +288,8 @@ public final class MediaHub implements MediaNotificationListener.Callback, TechB
         notifyListener();
     }
 
+    private String activeArtTrackKey = "";
+
     private void applyBluetoothState() {
         activeController = null;
         state.hasSession = true;
@@ -293,12 +298,42 @@ public final class MediaHub implements MediaNotificationListener.Callback, TechB
         state.sourceLabel = "蓝牙音乐";
         state.title = !TextUtils.isEmpty(btSnap.title) ? btSnap.title : (btSnap.playing ? "手机蓝牙播放中" : "");
         state.artist = !TextUtils.isEmpty(btSnap.artist) ? btSnap.artist : "手机蓝牙音频";
-        state.albumArt = null;
         state.playing = btSnap.playing;
         state.durationMs = Math.max(0L, btSnap.durationMs);
         state.positionMs = Math.max(0L, btSnap.positionMs);
         state.positionUpdateTimeMs = SystemClock.elapsedRealtime();
         state.playbackSpeed = 1f;
+        resolveAlbumArt(btSnap.title, btSnap.artist, btSnap.album, null);
+    }
+
+    private void resolveAlbumArt(String title, String artist, String album, Bitmap directArt) {
+        if (directArt != null) {
+            activeArtTrackKey = "";
+            state.albumArt = directArt;
+            return;
+        }
+        if (TextUtils.isEmpty(title)) {
+            activeArtTrackKey = "";
+            state.albumArt = null;
+            return;
+        }
+        final String key = AlbumArtFetcher.makeKey(title, artist, album);
+        activeArtTrackKey = key;
+        Bitmap cached = albumArtFetcher.getFromMemory(key);
+        if (cached != null) {
+            state.albumArt = cached;
+            return;
+        }
+        state.albumArt = null;
+        albumArtFetcher.fetchAsync(title, artist, album, new AlbumArtFetcher.Callback() {
+            @Override
+            public void onArtLoaded(String trackKey, Bitmap bitmap) {
+                if (bitmap != null && trackKey.equals(activeArtTrackKey)) {
+                    state.albumArt = bitmap;
+                    notifyListener();
+                }
+            }
+        });
     }
 
     private void applyLocalController(MediaController mc) {
@@ -329,7 +364,8 @@ public final class MediaHub implements MediaNotificationListener.Callback, TechB
         state.sourceLabel = UiUtil.getAppLabel(ctx, pkg);
         state.title = title;
         state.artist = artist;
-        state.albumArt = art;
+        String album = mm != null ? safeStr(mm.getString(MediaMetadata.METADATA_KEY_ALBUM)) : "";
+        resolveAlbumArt(title, artist, album, art);
         state.durationMs = Math.max(0L, duration);
         if (pb != null) {
             state.playing = (pb.getState() == PlaybackState.STATE_PLAYING);
