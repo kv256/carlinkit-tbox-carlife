@@ -28,6 +28,7 @@ LOGS=$RUN/logs
 G=/config/usb_gadget/g1
 UDC=7000000.dwc3
 UDC_STATE=/sys/class/udc/$UDC/state
+BUSYBOX=/data/adb/magisk/busybox
 CARLIFE_VID=0x18d1
 GUARD_UNTIL_UPTIME=120          # keep re-asserting USB ownership during boot (seconds)
 AOA_WAIT_MD_MS=4000             # HU retries accessory re-enumeration 10 x 500 ms after START
@@ -86,12 +87,21 @@ stop_pid() {
 
 cleanup_all() {
     log "CLEANUP_ALL"
+    unshield_strings
     stop_pid "$GUARD_PID"; GUARD_PID=""
     stop_observer
     stop_pid "$BTW_PID"; BTW_PID=""
     stop_pid "$MD_PID"; MD_PID=""
 }
 trap 'cleanup_all; exit 0' TERM INT
+
+# Remove any /dev/null bind shields placed on g1/strings/0x409/* by post-fs-data.sh.
+unshield_strings() {
+    [ -x "$BUSYBOX" ] || return 0
+    for s in serialnumber manufacturer product; do
+        "$BUSYBOX" umount "$G/strings/0x409/$s" 2>/dev/null || true
+    done
+}
 
 claim_usb_props() {
     setprop sys.usb.configfs 2
@@ -124,6 +134,7 @@ init_usb_hw() {
     # Take exclusive control from stock init.usb.configfs.rc / init.msm.usb.configfs.rc (configfs=1 triggers)
     claim_usb_props
     : > "$RUN/usb.daemon"   # post-fs-data.sh keeper stops touching the gadget
+    unshield_strings
     log "USB_CLAIMED configfs=$(getprop sys.usb.configfs) udc_state=$(cat "$UDC_STATE" 2>/dev/null)"
 }
 
@@ -156,6 +167,7 @@ clear_gadget() {
 
 publish_mtp() {
     claim_usb_props
+    unshield_strings
     serial=$(getprop ro.serialno 2>/dev/null)
     [ -n "$serial" ] || serial="12345678"
     # Gadget already published by post-fs-data.sh at ~6.5 s: keep it bound (a rebind would make the

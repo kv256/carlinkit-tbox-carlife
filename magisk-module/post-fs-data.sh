@@ -56,11 +56,41 @@ LOGF=$RUN/logs/daemon.log
     [ -n "$serial" ] || serial=12345678
     mkdir -p "$G/strings/0x409" "$G/configs/b.1/strings/0x409" "$G/functions/mtp.gs0" "$G/functions/accessory.gs2" 2>/dev/null
 
+    BB=/data/adb/magisk/busybox
+    SHIELDED=0
     set_strings() {
         [ "$(cat "$G/strings/0x409/serialnumber" 2>/dev/null)" = "$serial" ] || printf '%s' "$serial" > "$G/strings/0x409/serialnumber"
         [ "$(cat "$G/strings/0x409/manufacturer" 2>/dev/null)" = "CarLife" ] || printf 'CarLife' > "$G/strings/0x409/manufacturer"
         [ "$(cat "$G/strings/0x409/product" 2>/dev/null)" = "AndroidBox" ] || printf 'AndroidBox' > "$G/strings/0x409/product"
     }
+    shield_strings() {
+        [ -x "$BB" ] || return 0
+        ok=1
+        for s in serialnumber manufacturer product; do
+            if ! "$BB" mount --bind /dev/null "$G/strings/0x409/$s" 2>/dev/null; then
+                ok=0
+            fi
+        done
+        if [ "$ok" = "1" ]; then
+            SHIELDED=1
+            log "EARLY_USB_SHIELDED"
+        else
+            for s in serialnumber manufacturer product; do
+                "$BB" umount "$G/strings/0x409/$s" 2>/dev/null || true
+            done
+            SHIELDED=0
+            log "EARLY_USB_SHIELD_FAILED"
+        fi
+    }
+    unshield_strings() {
+        [ "$SHIELDED" = "1" ] || return 0
+        SHIELDED=0
+        for s in serialnumber manufacturer product; do
+            "$BB" umount "$G/strings/0x409/$s" 2>/dev/null || true
+        done
+        log "EARLY_USB_UNSHIELDED"
+    }
+    trap 'unshield_strings' EXIT
     bind() {
         [ -L "$G/configs/b.1/f1" ] || ln -s "$G/functions/mtp.gs0" "$G/configs/b.1/f1"
         [ -n "$(cat "$G/UDC" 2>/dev/null)" ] || echo "$UDC" > "$G/UDC"
@@ -76,9 +106,16 @@ LOGF=$RUN/logs/daemon.log
     set_strings
     echo 0xc0 > "$G/configs/b.1/bmAttributes"
     printf 'mtp' > "$G/configs/b.1/strings/0x409/configuration"
+    echo 1 > "$G/os_desc/use" 2>/dev/null
+    echo 0x1 > "$G/os_desc/b_vendor_code" 2>/dev/null
+    printf 'MSFT100' > "$G/os_desc/qw_sign" 2>/dev/null
+    [ -L "$G/os_desc/b.1" ] || ln -s "$G/configs/b.1" "$G/os_desc/b.1" 2>/dev/null
     for f in "$G"/configs/b.1/f*; do [ -L "$f" ] && rm -f "$f"; done
+    # Block init.qcom.usb.rc "on boot" (~8.1-8.8 s) from overwriting serialnumber to 12345678
+    # (and manufacturer/product to ro.product.*) while the head unit is enumerating.
+    shield_strings
     bind
-    log "EARLY_USB_PUBLISHED vid=18d1 pid=4ee1 serial=$serial udc=$(cat "$G/UDC" 2>/dev/null)"
+    log "EARLY_USB_PUBLISHED vid=18d1 pid=4ee1 serial=$serial udc=$(cat "$G/UDC" 2>/dev/null) shielded=$SHIELDED"
 
     # - init sets sys.usb.configfs=1 in "on boot": take it back at once (configfs=2) and use
     #   sys.usb.config=carlife, which no trigger matches ("none" would unbind the gadget);
@@ -94,7 +131,7 @@ LOGF=$RUN/logs/daemon.log
             setprop sys.usb.config carlife
             log "EARLY_USB_CONFIGFS_CLAIMED"
         fi
-        set_strings
+        [ "$SHIELDED" = "1" ] || set_strings
         if [ ! -L "$G/configs/b.1/f1" ] || [ -z "$(cat "$G/UDC" 2>/dev/null)" ]; then
             bind
             rebinds=$((rebinds + 1))
@@ -109,6 +146,7 @@ LOGF=$RUN/logs/daemon.log
         fi
         sleep 0.05
     done
+    unshield_strings
     log "EARLY_USB_HANDOVER rebinds=$rebinds daemon=$([ -f "$RUN/usb.daemon" ] && echo yes || echo timeout)"
 ) </dev/null >/dev/null 2>&1 &
 
