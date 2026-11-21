@@ -38,6 +38,8 @@ public class NavWidgetView extends FrameLayout {
 
     // Idle views
     private final TextView tvDate;
+    private final TextView tvBadge;
+    private final TextView tvCpuTemp;
 
     // Active nav views
     private final ManeuverIconView maneuverIcon;
@@ -71,7 +73,7 @@ public class NavWidgetView extends FrameLayout {
         tvDate.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         header.addView(tvDate, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView tvBadge = new TextView(context);
+        tvBadge = new TextView(context);
         tvBadge.setText("高德导航");
         tvBadge.setTextColor(0xFF7DD3FC);
         tvBadge.setTextSize(TypedValue.COMPLEX_UNIT_PX, 17f);
@@ -247,7 +249,37 @@ public class NavWidgetView extends FrameLayout {
         activeRoot.addView(footer, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         addView(activeRoot, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
+        // Optional CPU temperature badge anchored cleanly at top-right (visible in both idle & nav modes)
+        tvCpuTemp = new TextView(context);
+        tvCpuTemp.setTextColor(0xFF7DD3FC);
+        tvCpuTemp.setTextSize(TypedValue.COMPLEX_UNIT_PX, 17f);
+        tvCpuTemp.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        tvCpuTemp.setPadding(14, 5, 14, 5);
+        tvCpuTemp.setBackground(UiUtil.solidRounded(0x2038BDF8, 14f, 0x3838BDF8, 1));
+        tvCpuTemp.setVisibility(GONE);
+        FrameLayout.LayoutParams cpuLp = new FrameLayout.LayoutParams(
+            LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END);
+        cpuLp.topMargin = 18;
+        cpuLp.rightMargin = 22;
+        addView(tvCpuTemp, cpuLp);
+
         refreshDate();
+    }
+
+    public void setCpuTemp(boolean visible, float tempC) {
+        if (!visible) {
+            tvCpuTemp.setVisibility(GONE);
+            tvBadge.setVisibility(VISIBLE);
+            return;
+        }
+        tvBadge.setVisibility(GONE);
+        tvCpuTemp.setVisibility(VISIBLE);
+        int color = UiUtil.cpuTempColor(tempC);
+        int bg = (color & 0x00FFFFFF) | 0x22000000;
+        int stroke = (color & 0x00FFFFFF) | 0x44000000;
+        tvCpuTemp.setText("CPU " + UiUtil.formatCpuTemp(tempC));
+        tvCpuTemp.setTextColor(color);
+        tvCpuTemp.setBackground(UiUtil.solidRounded(bg, 14f, stroke, 1));
     }
 
     public void refreshDate() {

@@ -2,7 +2,10 @@ package com.tbox.carlauncher;
 
 import android.app.ActivityManager;
 import android.app.IActivityManager;
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
+import android.graphics.Bitmap;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.hardware.input.InputManager;
@@ -20,11 +23,19 @@ import android.view.MotionEvent;
 import android.view.Surface;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.InputStreamReader;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -50,6 +61,13 @@ public final class VdInputBridge {
     public static final int TX_UNINSTALL = IBinder.FIRST_CALL_TRANSACTION + 6;
     public static final int TX_BT_CMD = IBinder.FIRST_CALL_TRANSACTION + 7;
     public static final int TX_BT_STATE = IBinder.FIRST_CALL_TRANSACTION + 8;
+    public static final int TX_SWITCH_DPI = IBinder.FIRST_CALL_TRANSACTION + 9;
+    public static final int TX_FORCE_STOP = IBinder.FIRST_CALL_TRANSACTION + 10;
+    public static final int TX_MOVE_TASK_TO_STACK = IBinder.FIRST_CALL_TRANSACTION + 11;
+    public static final int TX_GET_RECENTS = IBinder.FIRST_CALL_TRANSACTION + 12;
+    public static final int TX_GET_TASK_SNAPSHOT = IBinder.FIRST_CALL_TRANSACTION + 13;
+    public static final int TX_REMOVE_TASK = IBinder.FIRST_CALL_TRANSACTION + 14;
+    public static final int TX_GET_CPU_TEMP = IBinder.FIRST_CALL_TRANSACTION + 15;
 
     // BT AT command codes for TX_BT_CMD
     public static final int BT_CMD_PLAY = 1;
@@ -76,6 +94,29 @@ public final class VdInputBridge {
     private static Method mCreateInputForwarder;
     private static Method mForwardEvent;
     private static IActivityManager iActivityManager;
+
+    private static final class DisplaySlot {
+        final int dpi;
+        final int width;
+        final int height;
+        VirtualDisplay vd;
+        int displayId = -1;
+        Object inputForwarder;
+
+        DisplaySlot(int dpi, int width, int height) {
+            this.dpi = dpi;
+            this.width = width;
+            this.height = height;
+        }
+    }
+
+    private static final Map<Integer, DisplaySlot> displaySlots = new HashMap<Integer, DisplaySlot>();
+    private static DisplaySlot activeSlot = null;
+    private static boolean surfaceAttached = false;
+    private static Surface currentSurface = null;
+    private static int baseW = 1248;
+    private static int baseH = 702;
+    private static int baseDpi = 238;
 
     private static VirtualDisplay virtualDisplay;
     private static int virtualDisplayId = -1;
@@ -358,40 +399,120 @@ public final class VdInputBridge {
         return false;
     }
 
+    public static int computeScaledWidth(int baseWidth, int baseDensity, int targetDpi) {
+        if (targetDpi <= 0 || targetDpi == baseDensity) return baseWidth;
+        int w = Math.round(baseWidth * ((float) baseDensity / (float) targetDpi));
+        w = Math.max(960, Math.min(2560, w));
+        return (w / 16) * 16; // keep clean 16:9 even dimensions
+    }
+
+    public static int computeScaledHeight(int scaledWidth) {
+        int h = Math.round(scaledWidth * 9f / 16f);
+        return (h / 2) * 2;
+    }
+
     private static synchronized int attachSurface(Surface surface, int w, int h, int dpi) {
         if (surface == null || w <= 0 || h <= 0) return -1;
-        if (dpi <= 0) dpi = 238;
+        if (dpi <= 0) dpi = baseDpi;
+        currentSurface = surface;
+        if (activeSlot == null) {
+            baseW = w;
+            baseH = h;
+        }
+        return switchToDpi(dpi);
+    }
+
+    private static synchronized int switchToDpi(int dpi) {
+        if (dpi <= 0) dpi = baseDpi;
+        if (currentSurface == null || baseW <= 0 || baseH <= 0) return -1;
+        int slotW = computeScaledWidth(baseW, baseDpi, dpi);
+        int slotH = computeScaledHeight(slotW);
+        // Keep VirtualDisplay density at baseDpi (238) while scaling the 16:9 canvas resolution!
+        // SurfaceFlinger hardware-scales slotW x slotH cleanly onto the 1248x702 SurfaceView,
+        // which works for 100% of apps (including apps like Bilibili Things that read Display 0's
+        // Application density or hardcode 1080p pixel layouts!).
         try {
-            if (virtualDisplay == null) {
-                virtualDisplay = displayManager.createVirtualDisplay(
-                    "TboxCarViewport16x9", w, h, dpi, surface, VD_FLAGS
+            if (activeSlot != null && activeSlot.dpi == dpi && activeSlot.vd != null) {
+                activeSlot.vd.setSurface(currentSurface);
+                activeSlot.vd.resize(slotW, slotH, baseDpi);
+                surfaceAttached = true;
+                if (activeSlot.inputForwarder == null && activeSlot.displayId > 0) {
+                    activeSlot.inputForwarder = mCreateInputForwarder.invoke(inputManager, activeSlot.displayId);
+                }
+                virtualDisplay = activeSlot.vd;
+                virtualDisplayId = activeSlot.displayId;
+                inputForwarder = activeSlot.inputForwarder;
+                Log.i(TAG, "Reattached Surface to VirtualDisplay id=" + virtualDisplayId
+                    + " size=" + slotW + "x" + slotH + " targetDpi=" + dpi);
+                return virtualDisplayId;
+            }
+
+            if (activeSlot != null && activeSlot.vd != null && surfaceAttached) {
+                try {
+                    activeSlot.vd.setSurface(null);
+                } catch (Throwable ignored) {}
+                surfaceAttached = false;
+                // Give SurfaceFlinger one vsync to release the Surface producer before connecting to another VD
+                try { Thread.sleep(45L); } catch (InterruptedException ignored) {}
+            }
+
+            DisplaySlot target = displaySlots.get(dpi);
+            if (target == null || target.vd == null) {
+                target = new DisplaySlot(dpi, slotW, slotH);
+                target.vd = displayManager.createVirtualDisplay(
+                    "TboxCarViewport_" + dpi, slotW, slotH, baseDpi, currentSurface, VD_FLAGS
                 );
-                if (virtualDisplay != null && virtualDisplay.getDisplay() != null) {
-                    virtualDisplayId = virtualDisplay.getDisplay().getDisplayId();
-                    inputForwarder = mCreateInputForwarder.invoke(inputManager, virtualDisplayId);
-                    Log.i(TAG, "Created owned VirtualDisplay id=" + virtualDisplayId
-                        + " size=" + w + "x" + h + " dpi=" + dpi + " forwarder=" + (inputForwarder != null));
+                if (target.vd != null && target.vd.getDisplay() != null) {
+                    target.displayId = target.vd.getDisplay().getDisplayId();
+                    target.inputForwarder = mCreateInputForwarder.invoke(inputManager, target.displayId);
+                    displaySlots.put(dpi, target);
+                    Log.i(TAG, "Created owned VirtualDisplay id=" + target.displayId
+                        + " size=" + slotW + "x" + slotH + " targetDpi=" + dpi
+                        + " forwarder=" + (target.inputForwarder != null));
                 }
             } else {
-                virtualDisplay.setSurface(surface);
-                virtualDisplay.resize(w, h, dpi);
-                if (inputForwarder == null && virtualDisplayId > 0) {
-                    inputForwarder = mCreateInputForwarder.invoke(inputManager, virtualDisplayId);
+                target.vd.setSurface(currentSurface);
+                target.vd.resize(slotW, slotH, baseDpi);
+                if (target.inputForwarder == null && target.displayId > 0) {
+                    target.inputForwarder = mCreateInputForwarder.invoke(inputManager, target.displayId);
                 }
-                Log.i(TAG, "Reattached Surface to VirtualDisplay id=" + virtualDisplayId + " size=" + w + "x" + h);
+                Log.i(TAG, "Switched active VirtualDisplay -> id=" + target.displayId
+                    + " size=" + slotW + "x" + slotH + " targetDpi=" + dpi);
             }
+
+            activeSlot = target;
+            surfaceAttached = (target.vd != null);
+            virtualDisplay = target.vd;
+            virtualDisplayId = target.displayId;
+            inputForwarder = target.inputForwarder;
             return virtualDisplayId;
         } catch (Throwable t) {
-            Log.e(TAG, "attachSurface failed", t);
+            Log.e(TAG, "switchToDpi(" + dpi + ") failed", t);
             return -1;
         }
     }
 
     private static synchronized void detachSurface() {
-        if (virtualDisplay != null) {
+        currentSurface = null;
+        if (activeSlot != null && activeSlot.vd != null && surfaceAttached) {
             try {
-                virtualDisplay.setSurface(null);
+                activeSlot.vd.setSurface(null);
             } catch (Throwable ignored) {}
+        }
+        surfaceAttached = false;
+    }
+
+    private static void forceStopPackage(String pkg) {
+        if (pkg == null || pkg.isEmpty() || "com.tbox.carlauncher".equals(pkg) || "com.android.systemui".equals(pkg)) {
+            return;
+        }
+        try {
+            Log.i(TAG, "Force-stopping package for DPI reload: " + pkg);
+            Process p = new ProcessBuilder("/system/bin/am", "force-stop", pkg)
+                .redirectErrorStream(true).start();
+            p.waitFor();
+        } catch (Throwable t) {
+            Log.w(TAG, "am force-stop failed: " + pkg, t);
         }
     }
 
@@ -463,6 +584,214 @@ public final class VdInputBridge {
                 }
             }
         });
+    }
+
+    private static void moveTaskToStack(final int taskId, final int targetStackId) {
+        if (iActivityManager == null || taskId <= 0 || targetStackId < 0) return;
+        cmdExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Log.i(TAG, "Promoting task=" + taskId + " -> Display 0 stack=" + targetStackId);
+                    Method m = iActivityManager.getClass().getMethod(
+                        "moveTaskToStack", int.class, int.class, boolean.class
+                    );
+                    m.invoke(iActivityManager, taskId, targetStackId, true);
+                } catch (Throwable t) {
+                    Log.w(TAG, "moveTaskToStack failed task=" + taskId + " stack=" + targetStackId, t);
+                }
+            }
+        });
+    }
+
+    private static volatile String cachedCpuThermalPath = null;
+
+    private static final class RecentEntry {
+        final int taskId;
+        final String pkg;
+        final boolean running;
+
+        RecentEntry(int taskId, String pkg, boolean running) {
+            this.taskId = taskId;
+            this.pkg = pkg;
+            this.running = running;
+        }
+    }
+
+    private static boolean isExcludedRecentPkg(String pkg) {
+        if (pkg == null || pkg.isEmpty()) return true;
+        return "com.tbox.carlauncher".equals(pkg)
+            || "com.android.systemui".equals(pkg)
+            || "com.android.launcher3".equals(pkg)
+            || "com.autolauncher.motorcar".equals(pkg)
+            || "com.android.packageinstaller".equals(pkg)
+            || "com.google.android.packageinstaller".equals(pkg)
+            || "com.suding.factorytest".equals(pkg);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<RecentEntry> queryRecentTasks() {
+        List<RecentEntry> out = new ArrayList<RecentEntry>();
+        if (iActivityManager == null) return out;
+        try {
+            Method mGetRecents = iActivityManager.getClass().getMethod(
+                "getRecentTasks", int.class, int.class, int.class
+            );
+            Object slice = mGetRecents.invoke(
+                iActivityManager, 24, ActivityManager.RECENT_IGNORE_UNAVAILABLE, 0
+            );
+            if (slice == null) return out;
+            Method mGetList = slice.getClass().getMethod("getList");
+            List<?> raw = (List<?>) mGetList.invoke(slice);
+            if (raw == null) return out;
+
+            Set<String> seen = new HashSet<String>();
+            for (Object obj : raw) {
+                if (!(obj instanceof ActivityManager.RecentTaskInfo)) continue;
+                ActivityManager.RecentTaskInfo rti = (ActivityManager.RecentTaskInfo) obj;
+                ComponentName cn = rti.baseActivity;
+                if (cn == null) cn = rti.origActivity;
+                if (cn == null && rti.baseIntent != null) cn = rti.baseIntent.getComponent();
+                if (cn == null) {
+                    try {
+                        cn = (ComponentName) rti.getClass().getField("realActivity").get(rti);
+                    } catch (Throwable ignored) {}
+                }
+                if (cn == null) continue;
+                String pkg = cn.getPackageName();
+                if (isExcludedRecentPkg(pkg) || seen.contains(pkg)) continue;
+                // Skip ES File Explorer's invisible install monitor hook activity
+                if ("com.estrongs.android.pop".equals(pkg)
+                        && cn.getClassName() != null && cn.getClassName().contains("InstallMonitor")) {
+                    continue;
+                }
+                int tid = rti.id >= 0 ? rti.id : rti.persistentId;
+                if (tid <= 0) continue;
+                seen.add(pkg);
+                out.add(new RecentEntry(tid, pkg, rti.id >= 0));
+                if (out.size() >= 14) break;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "queryRecentTasks failed", t);
+        }
+        return out;
+    }
+
+    private static byte[] captureTaskSnapshotJpeg(int taskId) {
+        if (iActivityManager == null || taskId <= 0) return null;
+        Bitmap hwBmp = null;
+        Bitmap swBmp = null;
+        Bitmap scaled = null;
+        try {
+            Method mGetSnap = iActivityManager.getClass().getMethod(
+                "getTaskSnapshot", int.class, boolean.class
+            );
+            Object snap = mGetSnap.invoke(iActivityManager, taskId, true);
+            if (snap == null) return null;
+            Method mGetBuf = snap.getClass().getMethod("getSnapshot");
+            Object gb = mGetBuf.invoke(snap);
+            if (gb == null) return null;
+            Class<?> gbCls = Class.forName("android.graphics.GraphicBuffer");
+            Method mCreateHw = Bitmap.class.getMethod("createHardwareBitmap", gbCls);
+            hwBmp = (Bitmap) mCreateHw.invoke(null, gb);
+            if (hwBmp == null) return null;
+            swBmp = hwBmp.copy(Bitmap.Config.ARGB_8888, false);
+            if (swBmp == null) return null;
+
+            int w = swBmp.getWidth();
+            int h = swBmp.getHeight();
+            Bitmap toEncode = swBmp;
+            if (w > 420 && h > 0) {
+                int tw = 420;
+                int th = Math.max(1, Math.round(h * (420f / w)));
+                scaled = Bitmap.createScaledBitmap(swBmp, tw, th, true);
+                toEncode = scaled;
+            }
+            ByteArrayOutputStream baos = new ByteArrayOutputStream(24 * 1024);
+            toEncode.compress(Bitmap.CompressFormat.JPEG, 76, baos);
+            return baos.toByteArray();
+        } catch (Throwable t) {
+            Log.w(TAG, "captureTaskSnapshotJpeg(" + taskId + ") failed", t);
+            return null;
+        } finally {
+            if (scaled != null && scaled != swBmp) try { scaled.recycle(); } catch (Throwable ignored) {}
+            if (swBmp != null) try { swBmp.recycle(); } catch (Throwable ignored) {}
+            if (hwBmp != null) try { hwBmp.recycle(); } catch (Throwable ignored) {}
+        }
+    }
+
+    private static boolean removeRecentTask(int taskId) {
+        if (iActivityManager == null || taskId <= 0) return false;
+        try {
+            Method mRemove = iActivityManager.getClass().getMethod("removeTask", int.class);
+            Object res = mRemove.invoke(iActivityManager, taskId);
+            boolean ok = (res instanceof Boolean) && ((Boolean) res).booleanValue();
+            Log.i(TAG, "removeTask(" + taskId + ") -> " + ok);
+            return ok;
+        } catch (Throwable t) {
+            Log.w(TAG, "removeTask(" + taskId + ") failed", t);
+            return false;
+        }
+    }
+
+    private static String readSmallFile(String path) {
+        BufferedReader br = null;
+        try {
+            br = new BufferedReader(new FileReader(path));
+            String line = br.readLine();
+            return line != null ? line.trim() : null;
+        } catch (Throwable ignored) {
+            return null;
+        } finally {
+            if (br != null) try { br.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    private static int readCpuTempMilliC() {
+        String path = cachedCpuThermalPath;
+        if (path == null) {
+            String bestPath = null;
+            int bestRank = -1;
+            for (int i = 0; i < 40; i++) {
+                String dir = "/sys/class/thermal/thermal_zone" + i;
+                File tempFile = new File(dir + "/temp");
+                if (!tempFile.exists()) continue;
+                String type = readSmallFile(dir + "/type");
+                if (type == null) type = "";
+                String lower = type.toLowerCase();
+                int rank = -1;
+                if (lower.contains("deca-cpu-max") || lower.contains("cpu-max")) {
+                    rank = 100;
+                } else if (lower.contains("apc1-l2") || lower.contains("apc1-cpu")) {
+                    rank = 80;
+                } else if (lower.contains("cpu")) {
+                    rank = 60;
+                } else if (lower.contains("tsens") || lower.contains("soc")) {
+                    rank = 40;
+                }
+                if (rank > bestRank) {
+                    String val = readSmallFile(dir + "/temp");
+                    if (val != null && !val.isEmpty()) {
+                        bestRank = rank;
+                        bestPath = dir + "/temp";
+                    }
+                }
+            }
+            if (bestPath == null) bestPath = "/sys/class/thermal/thermal_zone0/temp";
+            cachedCpuThermalPath = bestPath;
+            path = bestPath;
+            Log.i(TAG, "Selected CPU thermal zone: " + path);
+        }
+        String raw = readSmallFile(path);
+        if (raw == null || raw.isEmpty()) return -1;
+        try {
+            int v = Integer.parseInt(raw);
+            if (v > 0 && v < 200) return v * 1000;
+            if (v >= 200 && v < 2000) return v * 100;
+            return v;
+        } catch (Throwable ignored) {
+            return -1;
+        }
     }
 
     private static void uninstallPackage(final String pkg) {
@@ -578,6 +907,68 @@ public final class VdInputBridge {
                         reply.writeString(btAlbum);
                         reply.writeLong(btPosMs);
                         reply.writeLong(btDurMs);
+                    }
+                    return true;
+                } else if (code == TX_SWITCH_DPI) {
+                    data.enforceInterface(DESCRIPTOR);
+                    int dpi = data.readInt();
+                    int dispId = switchToDpi(dpi);
+                    if (reply != null) {
+                        reply.writeNoException();
+                        reply.writeInt(dispId);
+                        reply.writeInt(activeSlot != null ? activeSlot.width : baseW);
+                        reply.writeInt(activeSlot != null ? activeSlot.height : baseH);
+                    }
+                    return true;
+                } else if (code == TX_FORCE_STOP) {
+                    data.enforceInterface(DESCRIPTOR);
+                    String pkg = data.readString();
+                    forceStopPackage(pkg);
+                    if (reply != null) reply.writeNoException();
+                    return true;
+                } else if (code == TX_MOVE_TASK_TO_STACK) {
+                    data.enforceInterface(DESCRIPTOR);
+                    int taskId = data.readInt();
+                    int targetStackId = data.readInt();
+                    moveTaskToStack(taskId, targetStackId);
+                    return true;
+                } else if (code == TX_GET_RECENTS) {
+                    data.enforceInterface(DESCRIPTOR);
+                    List<RecentEntry> list = queryRecentTasks();
+                    if (reply != null) {
+                        reply.writeNoException();
+                        reply.writeInt(list.size());
+                        for (RecentEntry e : list) {
+                            reply.writeInt(e.taskId);
+                            reply.writeString(e.pkg);
+                            reply.writeInt(e.running ? 1 : 0);
+                        }
+                    }
+                    return true;
+                } else if (code == TX_GET_TASK_SNAPSHOT) {
+                    data.enforceInterface(DESCRIPTOR);
+                    int taskId = data.readInt();
+                    byte[] jpg = captureTaskSnapshotJpeg(taskId);
+                    if (reply != null) {
+                        reply.writeNoException();
+                        reply.writeByteArray(jpg);
+                    }
+                    return true;
+                } else if (code == TX_REMOVE_TASK) {
+                    data.enforceInterface(DESCRIPTOR);
+                    int taskId = data.readInt();
+                    boolean ok = removeRecentTask(taskId);
+                    if (reply != null) {
+                        reply.writeNoException();
+                        reply.writeInt(ok ? 1 : 0);
+                    }
+                    return true;
+                } else if (code == TX_GET_CPU_TEMP) {
+                    data.enforceInterface(DESCRIPTOR);
+                    int milliC = readCpuTempMilliC();
+                    if (reply != null) {
+                        reply.writeNoException();
+                        reply.writeInt(milliC);
                     }
                     return true;
                 }

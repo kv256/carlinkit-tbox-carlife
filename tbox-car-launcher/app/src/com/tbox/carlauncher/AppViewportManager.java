@@ -7,6 +7,8 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
@@ -28,6 +30,7 @@ import android.widget.FrameLayout;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -58,6 +61,7 @@ public final class AppViewportManager {
 
     private final Context ctx;
     private final FrameLayout container;
+    private final LauncherPrefs prefs;
     private final Listener listener;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -65,10 +69,19 @@ public final class AppViewportManager {
     private RoundedCornerFrameOverlay cornerOverlay;
     private volatile IBinder bridgeBinder;
     private volatile int virtualDisplayId = -1;
+    private volatile int activeDpi = 0;
+    private volatile int activeVdW = 1248;
+    private volatile int activeVdH = 702;
     private volatile boolean ready = false;
     private volatile boolean active = true;
     private Surface lastSurface;
     private int lastW, lastH;
+    private int surfaceBufW = 0;
+    private int surfaceBufH = 0;
+    private int pendingDpi = -1;
+    private int pendingVdW = 0;
+    private int pendingVdH = 0;
+    private Runnable pendingAfterResize = null;
     private String currentAppPkg = "";
     private String pendingLaunchPkg = null;
 
@@ -77,13 +90,15 @@ public final class AppViewportManager {
     private TaskStackListener taskStackListener;
     private boolean tslRegistered = false;
     private long lastConfineMs = 0L;
+    private int lastPromoteTaskId = -1;
+    private long lastPromoteMs = 0L;
 
-    private Field fStackId, fDisplayId, fTopActivity, fVisible, fTaskIds;
+    private Field fStackId, fDisplayId, fTopActivity, fVisible, fTaskIds, fTaskNames;
 
     private final Runnable checkStacksRunnable = new Runnable() {
         @Override
         public void run() {
-            if (!active || !ready || virtualDisplayId <= 0) return;
+            if (!active || !ready || virtualDisplayId <= 0 || pendingDpi > 0) return;
             enforceConfinementAndSyncTopApp();
         }
     };
@@ -96,9 +111,28 @@ public final class AppViewportManager {
         }
     };
 
-    public AppViewportManager(Context ctx, FrameLayout container, Listener listener) {
+    private final Runnable completeResizeAttachRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (pendingDpi <= 0 || lastSurface == null || lastW <= 0 || lastH <= 0) return;
+            int targetDpi = pendingDpi;
+            Runnable after = pendingAfterResize;
+            pendingDpi = -1;
+            pendingVdW = 0;
+            pendingVdH = 0;
+            pendingAfterResize = null;
+            activeDpi = targetDpi;
+            attachSurfaceToBridge(lastSurface, lastW, lastH);
+            if (after != null) {
+                after.run();
+            }
+        }
+    };
+
+    public AppViewportManager(Context ctx, FrameLayout container, LauncherPrefs prefs, Listener listener) {
         this.ctx = ctx;
         this.container = container;
+        this.prefs = prefs;
         this.listener = listener;
         initReflection();
     }
@@ -118,6 +152,7 @@ public final class AppViewportManager {
             fTopActivity = siCls.getField("topActivity");
             fVisible = siCls.getField("visible");
             fTaskIds = siCls.getField("taskIds");
+            fTaskNames = siCls.getField("taskNames");
         } catch (Throwable t) {
             Log.e(TAG, "Failed to init reflection", t);
         }
@@ -163,23 +198,47 @@ public final class AppViewportManager {
                 if (w > 0 && h > 0) {
                     lastW = w;
                     lastH = h;
-                    attachSurfaceToBridge(lastSurface, w, h);
+                    if (surfaceBufW <= 0 || surfaceBufH <= 0) {
+                        surfaceBufW = w;
+                        surfaceBufH = h;
+                    }
+                    if (pendingDpi <= 0) {
+                        attachSurfaceToBridge(lastSurface, w, h);
+                    }
                 }
             }
 
             @Override
             public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
                 lastSurface = holder.getSurface();
-                lastW = width;
-                lastH = height;
-                if (width > 0 && height > 0) {
-                    attachSurfaceToBridge(lastSurface, width, height);
+                surfaceBufW = width;
+                surfaceBufH = height;
+                int vw = surfaceView.getWidth();
+                int vh = surfaceView.getHeight();
+                if (vw > 0 && vh > 0) {
+                    lastW = vw;
+                    lastH = vh;
+                }
+                if (pendingDpi > 0) {
+                    if (width == pendingVdW && height == pendingVdH) {
+                        // Give SurfaceFlinger ~65ms to apply BufferLayer::setSize and finish
+                        // releasing the previous DisplayDevice before binding the new VD.
+                        mainHandler.removeCallbacks(completeResizeAttachRunnable);
+                        mainHandler.postDelayed(completeResizeAttachRunnable, 65L);
+                    }
+                    return;
+                }
+                if (lastW > 0 && lastH > 0) {
+                    attachSurfaceToBridge(lastSurface, lastW, lastH);
                 }
             }
 
             @Override
             public void surfaceDestroyed(SurfaceHolder holder) {
+                mainHandler.removeCallbacks(completeResizeAttachRunnable);
                 lastSurface = null;
+                surfaceBufW = 0;
+                surfaceBufH = 0;
                 detachSurfaceFromBridge();
             }
         });
@@ -208,19 +267,24 @@ public final class AppViewportManager {
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();
         try {
+            int initDpi = activeDpi > 0 ? activeDpi : getDisplayDensityDpi();
             data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
             surface.writeToParcel(data, 0);
             data.writeInt(w);
             data.writeInt(h);
-            data.writeInt(getDisplayDensityDpi());
+            data.writeInt(initDpi);
             b.transact(VdInputBridge.TX_ATTACH_SURFACE, data, reply, 0);
             reply.readException();
             int dispId = reply.readInt();
             if (dispId > 0) {
                 boolean firstReady = !ready;
                 virtualDisplayId = dispId;
+                activeDpi = initDpi;
+                activeVdW = VdInputBridge.computeScaledWidth(w, getDisplayDensityDpi(), initDpi);
+                activeVdH = VdInputBridge.computeScaledHeight(activeVdW);
                 ready = true;
-                Log.i(TAG, "Bridge VirtualDisplay READY id=" + dispId + " size=" + w + "x" + h);
+                Log.i(TAG, "Bridge VirtualDisplay READY id=" + dispId + " view=" + w + "x" + h
+                    + " vd=" + activeVdW + "x" + activeVdH + " dpi=" + initDpi);
                 registerTaskWatcher();
                 if (firstReady && listener != null) {
                     mainHandler.post(new Runnable() {
@@ -270,20 +334,27 @@ public final class AppViewportManager {
         if (count <= 0) return;
         MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[count];
         MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[count];
+        float vw = surfaceView != null && surfaceView.getWidth() > 0 ? surfaceView.getWidth() : 1248f;
+        float vh = surfaceView != null && surfaceView.getHeight() > 0 ? surfaceView.getHeight() : 702f;
+        float sx = activeVdW / vw;
+        float sy = activeVdH / vh;
         for (int i = 0; i < count; i++) {
             props[i] = new MotionEvent.PointerProperties();
             ev.getPointerProperties(i, props[i]);
             coords[i] = new MotionEvent.PointerCoords();
             ev.getPointerCoords(i, coords[i]);
-            // Ensure raw pointer coords are strictly surfaceView-local (0..1248, 0..702)
-            coords[i].x = ev.getX(i);
-            coords[i].y = ev.getY(i);
+            // Scale surfaceView-local coords (0..1248, 0..702) cleanly to VirtualDisplay coords (0..vdW, 0..vdH)
+            coords[i].x = ev.getX(i) * sx;
+            coords[i].y = ev.getY(i) * sy;
         }
+        // Strip obscured flags inherited from Display 0 overlays (e.g. temp monitor / floating ball)
+        // so PackageInstaller & runtime permission dialogs inside the VirtualDisplay never drop taps.
+        int cleanFlags = ev.getFlags() & ~(MotionEvent.FLAG_WINDOW_IS_OBSCURED | 0x2);
         MotionEvent localEv = MotionEvent.obtain(
             ev.getDownTime(), ev.getEventTime(), ev.getAction(),
             count, props, coords, ev.getMetaState(), ev.getButtonState(),
             ev.getXPrecision(), ev.getYPrecision(), ev.getDeviceId(),
-            ev.getEdgeFlags(), ev.getSource(), ev.getFlags()
+            ev.getEdgeFlags(), ev.getSource(), cleanFlags
         );
         Parcel data = Parcel.obtain();
         try {
@@ -359,19 +430,223 @@ public final class AppViewportManager {
         }
     }
 
-    public boolean launchPackage(String pkg) {
+    public int getActiveDpi() {
+        return activeDpi > 0 ? activeDpi : getDisplayDensityDpi();
+    }
+
+    private boolean switchToDpiSync(int targetDpi, String pkg) {
+        IBinder b = getBridge();
+        if (b == null) return false;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
+            data.writeInt(targetDpi);
+            b.transact(VdInputBridge.TX_SWITCH_DPI, data, reply, 0);
+            reply.readException();
+            int dispId = reply.readInt();
+            int vdW = reply.readInt();
+            int vdH = reply.readInt();
+            if (dispId > 0) {
+                virtualDisplayId = dispId;
+                activeDpi = targetDpi;
+                if (vdW > 0 && vdH > 0) {
+                    activeVdW = vdW;
+                    activeVdH = vdH;
+                }
+                Log.i(TAG, "Switched viewport for " + pkg + " -> display=" + dispId
+                    + " vd=" + activeVdW + "x" + activeVdH + " dpi=" + targetDpi);
+                return true;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "TX_SWITCH_DPI(" + targetDpi + ") failed", t);
+            bridgeBinder = null;
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+        return false;
+    }
+
+    public void ensureDpiForPackage(final String pkg, final Runnable onReady) {
+        int baseDpi = getDisplayDensityDpi();
+        int targetDpi = prefs != null
+            ? prefs.getEffectiveAppDpi(pkg, baseDpi)
+            : baseDpi;
+        int vw = surfaceView != null && surfaceView.getWidth() > 0
+            ? surfaceView.getWidth() : (lastW > 0 ? lastW : 1248);
+        int targetW = VdInputBridge.computeScaledWidth(vw, baseDpi, targetDpi);
+        int targetH = VdInputBridge.computeScaledHeight(targetW);
+
+        if (pendingDpi <= 0 && targetDpi == activeDpi && virtualDisplayId > 0
+                && surfaceBufW == targetW && surfaceBufH == targetH) {
+            if (onReady != null) onReady.run();
+            return;
+        }
+
+        if (surfaceView != null && (surfaceBufW != targetW || surfaceBufH != targetH)) {
+            Log.i(TAG, "Resizing SurfaceView buffer " + surfaceBufW + "x" + surfaceBufH
+                + " -> " + targetW + "x" + targetH + " before attaching dpi=" + targetDpi + " (" + pkg + ")");
+            mainHandler.removeCallbacks(completeResizeAttachRunnable);
+            detachSurfaceFromBridge();
+            pendingDpi = targetDpi;
+            pendingVdW = targetW;
+            pendingVdH = targetH;
+            pendingAfterResize = onReady;
+            surfaceView.getHolder().setFixedSize(targetW, targetH);
+            // Fallback in case SurfaceView was already at requested size and skips surfaceChanged
+            mainHandler.postDelayed(completeResizeAttachRunnable, 220L);
+            return;
+        }
+
+        switchToDpiSync(targetDpi, pkg);
+        if (onReady != null) onReady.run();
+    }
+
+    public static final class RecentTaskItem {
+        public final int taskId;
+        public final String packageName;
+        public final boolean running;
+
+        public RecentTaskItem(int taskId, String packageName, boolean running) {
+            this.taskId = taskId;
+            this.packageName = packageName;
+            this.running = running;
+        }
+    }
+
+    public List<RecentTaskItem> getRecentTasks() {
+        List<RecentTaskItem> out = new ArrayList<RecentTaskItem>();
+        IBinder b = getBridge();
+        if (b == null) return out;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
+            b.transact(VdInputBridge.TX_GET_RECENTS, data, reply, 0);
+            reply.readException();
+            int count = reply.readInt();
+            for (int i = 0; i < count; i++) {
+                int tid = reply.readInt();
+                String pkg = reply.readString();
+                boolean running = reply.readInt() != 0;
+                if (pkg != null && !pkg.isEmpty()) {
+                    out.add(new RecentTaskItem(tid, pkg, running));
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "TX_GET_RECENTS failed", t);
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+        return out;
+    }
+
+    public Bitmap getTaskSnapshot(int taskId) {
+        IBinder b = getBridge();
+        if (b == null || taskId <= 0) return null;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
+            data.writeInt(taskId);
+            b.transact(VdInputBridge.TX_GET_TASK_SNAPSHOT, data, reply, 0);
+            reply.readException();
+            byte[] jpg = reply.createByteArray();
+            if (jpg != null && jpg.length > 0) {
+                return BitmapFactory.decodeByteArray(jpg, 0, jpg.length);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "TX_GET_TASK_SNAPSHOT(" + taskId + ") failed", t);
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+        return null;
+    }
+
+    public boolean removeRecentTask(int taskId) {
+        IBinder b = getBridge();
+        if (b == null || taskId <= 0) return false;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
+            data.writeInt(taskId);
+            b.transact(VdInputBridge.TX_REMOVE_TASK, data, reply, 0);
+            reply.readException();
+            return reply.readInt() != 0;
+        } catch (Throwable t) {
+            Log.w(TAG, "TX_REMOVE_TASK(" + taskId + ") failed", t);
+            return false;
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+    }
+
+    public float getCpuTempCelsius() {
+        IBinder b = getBridge();
+        if (b == null) return -1f;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
+            b.transact(VdInputBridge.TX_GET_CPU_TEMP, data, reply, 0);
+            reply.readException();
+            int milliC = reply.readInt();
+            return milliC > 0 ? (milliC / 1000f) : -1f;
+        } catch (Throwable t) {
+            return -1f;
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+    }
+
+    public void forceStopPackage(String pkg) {
+        IBinder b = getBridge();
+        if (b == null || pkg == null || pkg.isEmpty()) return;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
+            data.writeString(pkg);
+            b.transact(VdInputBridge.TX_FORCE_STOP, data, reply, 0);
+            reply.readException();
+        } catch (Throwable t) {
+            Log.w(TAG, "TX_FORCE_STOP failed for " + pkg, t);
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+    }
+
+    public boolean launchPackage(final String pkg) {
         if (pkg == null || pkg.isEmpty() || "com.tbox.carlauncher".equals(pkg)) return false;
         if (!isReady()) {
             pendingLaunchPkg = pkg;
             return false;
         }
-        IBinder b = getBridge();
-        if (b == null) return false;
-        String component = resolveBestComponent(pkg);
+        if (getBridge() == null) return false;
+        final String component = resolveBestComponent(pkg);
         if (component == null) {
             Log.w(TAG, "No launchable component for " + pkg);
             return false;
         }
+        ensureDpiForPackage(pkg, new Runnable() {
+            @Override
+            public void run() {
+                dispatchLaunchComponent(pkg, component);
+            }
+        });
+        return true;
+    }
+
+    private void dispatchLaunchComponent(String pkg, String component) {
+        IBinder b = getBridge();
+        if (b == null) return;
         Parcel data = Parcel.obtain();
         try {
             data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
@@ -381,11 +656,9 @@ public final class AppViewportManager {
             if (listener != null) listener.onActiveAppChanged(pkg);
             mainHandler.removeCallbacks(checkStacksRunnable);
             mainHandler.postDelayed(checkStacksRunnable, 500L);
-            return true;
         } catch (Throwable t) {
             Log.e(TAG, "TX_LAUNCH failed for " + pkg, t);
             bridgeBinder = null;
-            return false;
         } finally {
             data.recycle();
         }
@@ -442,6 +715,8 @@ public final class AppViewportManager {
             String topOnVd = null;
             int escapeStackId = -1;
             String escapePkg = null;
+            int promoteTaskId = -1;
+            String promotePkg = null;
             int launcherStackId = -1;
             int launcherTaskId = -1;
 
@@ -452,19 +727,44 @@ public final class AppViewportManager {
                 boolean visible = fVisible.getBoolean(si);
                 ComponentName top = (ComponentName) fTopActivity.get(si);
                 int[] taskIds = (int[]) fTaskIds.get(si);
+                String[] taskNames = fTaskNames != null ? (String[]) fTaskNames.get(si) : null;
                 if (top == null) continue;
                 String pkg = top.getPackageName();
 
-                if ("com.tbox.carlauncher".equals(pkg) && dispId == 0) {
+                if (dispId == 0 && "com.tbox.carlauncher".equals(pkg)) {
                     launcherStackId = stackId;
                     if (taskIds != null && taskIds.length > 0) {
                         launcherTaskId = taskIds[taskIds.length - 1];
                     }
                     continue;
                 }
+                if (dispId == 0 && launcherStackId < 0 && taskNames != null) {
+                    for (String tn : taskNames) {
+                        if (tn != null && tn.startsWith("com.tbox.carlauncher/")) {
+                            launcherStackId = stackId;
+                            break;
+                        }
+                    }
+                }
 
-                if (dispId == virtualDisplayId && visible && topOnVd == null) {
-                    topOnVd = pkg;
+                if (dispId == virtualDisplayId && visible) {
+                    if (topOnVd == null) topOnVd = pkg;
+                    // PackageInstallerActivity disables its Install button inside onPause() as
+                    // anti-tapjacking protection. Because touching Display 0 SurfaceView triggers
+                    // TaskTapPointerEventListener -> setFocusedTask(Launcher) -> onPause() BEFORE
+                    // ACTION_UP arrives on the VirtualDisplay, promote standalone PackageInstaller
+                    // tasks to Display 0 where taps go directly to the Install button!
+                    if (promoteTaskId < 0 && isPackageInstallerPkg(pkg)
+                            && taskIds != null && taskIds.length > 0
+                            && taskNames != null && taskNames.length == taskIds.length) {
+                        int lastIdx = taskIds.length - 1;
+                        String baseName = taskNames[lastIdx];
+                        if (baseName != null && (baseName.startsWith("com.android.packageinstaller/")
+                                || baseName.startsWith("com.google.android.packageinstaller/"))) {
+                            promoteTaskId = taskIds[lastIdx];
+                            promotePkg = pkg;
+                        }
+                    }
                 } else if (dispId == 0 && visible && !isWhitelistedForDisplay0(top)) {
                     if (escapeStackId < 0) {
                         escapeStackId = stackId;
@@ -473,32 +773,66 @@ public final class AppViewportManager {
                 }
             }
 
-            if (escapeStackId >= 0 && escapePkg != null) {
+            if (promoteTaskId > 0 && launcherStackId >= 0) {
                 long now = SystemClock.uptimeMillis();
-                if (now - lastConfineMs > 250L) {
-                    lastConfineMs = now;
-                    Log.i(TAG, "Confining external app " + escapePkg + " (stack=" + escapeStackId
-                        + ") from display 0 -> 16:9 display " + virtualDisplayId);
+                if (promoteTaskId != lastPromoteTaskId || now - lastPromoteMs > 400L) {
+                    lastPromoteTaskId = promoteTaskId;
+                    lastPromoteMs = now;
+                    Log.i(TAG, "Promoting " + promotePkg + " (task=" + promoteTaskId
+                        + ") from VirtualDisplay -> Display 0 stack=" + launcherStackId);
                     IBinder b = getBridge();
                     if (b != null) {
                         Parcel data = Parcel.obtain();
                         try {
                             data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
-                            data.writeInt(escapeStackId);
-                            data.writeInt(launcherTaskId);
+                            data.writeInt(promoteTaskId);
                             data.writeInt(launcherStackId);
-                            b.transact(VdInputBridge.TX_MOVE_STACK, data, null, IBinder.FLAG_ONEWAY);
+                            b.transact(VdInputBridge.TX_MOVE_TASK_TO_STACK, data, null, IBinder.FLAG_ONEWAY);
                         } catch (Throwable t) {
                             bridgeBinder = null;
                         } finally {
                             data.recycle();
                         }
                     }
-                    currentAppPkg = escapePkg;
-                    if (listener != null) {
-                        listener.onAppConfinedFromMainDisplay(escapePkg);
-                        listener.onActiveAppChanged(escapePkg);
-                    }
+                }
+                return;
+            }
+
+            if (escapeStackId >= 0 && escapePkg != null) {
+                long now = SystemClock.uptimeMillis();
+                if (now - lastConfineMs > 250L) {
+                    lastConfineMs = now;
+                    final int fStack = escapeStackId;
+                    final String fPkg = escapePkg;
+                    final int fLauncherTask = launcherTaskId;
+                    final int fLauncherStack = launcherStackId;
+                    ensureDpiForPackage(fPkg, new Runnable() {
+                        @Override
+                        public void run() {
+                            Log.i(TAG, "Confining external app " + fPkg + " (stack=" + fStack
+                                + ") from display 0 -> 16:9 display " + virtualDisplayId);
+                            IBinder b = getBridge();
+                            if (b != null) {
+                                Parcel data = Parcel.obtain();
+                                try {
+                                    data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
+                                    data.writeInt(fStack);
+                                    data.writeInt(fLauncherTask);
+                                    data.writeInt(fLauncherStack);
+                                    b.transact(VdInputBridge.TX_MOVE_STACK, data, null, IBinder.FLAG_ONEWAY);
+                                } catch (Throwable t) {
+                                    bridgeBinder = null;
+                                } finally {
+                                    data.recycle();
+                                }
+                            }
+                            currentAppPkg = fPkg;
+                            if (listener != null) {
+                                listener.onAppConfinedFromMainDisplay(fPkg);
+                                listener.onActiveAppChanged(fPkg);
+                            }
+                        }
+                    });
                 }
                 return;
             }
@@ -510,6 +844,11 @@ public final class AppViewportManager {
         } catch (Throwable t) {
             Log.w(TAG, "enforceConfinementAndSyncTopApp error", t);
         }
+    }
+
+    private static boolean isPackageInstallerPkg(String pkg) {
+        return "com.android.packageinstaller".equals(pkg)
+            || "com.google.android.packageinstaller".equals(pkg);
     }
 
     private static boolean isWhitelistedForDisplay0(ComponentName cn) {
@@ -561,12 +900,12 @@ public final class AppViewportManager {
 
             maskPath.reset();
             maskPath.setFillType(Path.FillType.EVEN_ODD);
-            maskPath.addRect(0, 0, w, h, Path.Direction.CW);
-            rect.set(0, 0, w, h);
+            maskPath.addRect(-1f, -1f, w + 1f, h + 1f, Path.Direction.CW);
+            rect.set(0.5f, 0.5f, w - 0.5f, h - 0.5f);
             maskPath.addRoundRect(rect, radius, radius, Path.Direction.CW);
             c.drawPath(maskPath, maskPaint);
 
-            rect.set(1f, 1f, w - 1f, h - 1f);
+            rect.set(0.5f, 0.5f, w - 0.5f, h - 0.5f);
             c.drawRoundRect(rect, radius, radius, borderPaint);
         }
     }

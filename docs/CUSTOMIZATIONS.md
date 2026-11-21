@@ -86,13 +86,15 @@
 
 - 包名：`com.tbox.carlauncher`（通过 Magisk 非破坏性挂载至 `/system/priv-app/TboxCarLauncher/TboxCarLauncher.apk`，配套 `/system/etc/permissions/privapp-permissions-tboxcarlauncher.xml`、静态 RRO 覆盖包 `/system/vendor/overlay/TboxNoNavBarOverlay.apk` 及开机伴生桥 `/data/adb/service.d/tbox_vd_input.sh`；停用系统原生 `com.android.launcher3` 并通过 RRO 将 `config_showNavigationBar=false` 且 `navigation_bar_width/height=0dp`，彻底根治原厂 `SystemUI` `refleshNavigationBar()` 在左边缘滑入时重建 `SdNavigationBarView` 的问题）。
 - **方案 B 精确 `1920 × 720` 浮岛分区（弱化边框 / 矢量图标）**：
-  - 左侧 Dock：`112 × 702`（数字时钟长按进设置、三弧同心矢量 Wi-Fi 与蓝牙连接图标、4 个长按可自定义快捷应用与激活指示条、底部精简为返回键 + 应用抽屉键「短按切换抽屉 / 长按唤醒语音助手」）；
-  - 中间严格 16:9 主显示区：**`1248 × 702`**（`20px` 圆角微光边框；应用抽屉采用纯图标 `< / >` 翻页，长按第三方应用支持直接卸载）；
-  - 右上导航卡片：`512 × 345`（空闲态展示日期 + 极简居中「回家 / 去公司」按钮 + 打开地图/搜目的地；自动读取高德车机版内已保存的家/公司地址 `KEY_TYPE=10045/10040`，若高德未设置则通过 `10046/12005` 反馈并提示在高德中设置；导航开始后自动切换为矢量转向箭头 + 距离 + 路名 + 剩余里程/时间/ETA + 进度条）；
+  - 左侧 Dock：`112 × 702`（数字时钟长按进设置、三弧同心矢量 Wi-Fi 与蓝牙连接图标、可选 CPU 实时温度胶囊、4 个长按可自定义快捷应用与激活指示条、底部精简为返回键「短按返回 / 长按打开 16:9 最近任务切换器」+ 应用抽屉键「短按切换抽屉 / 长按唤醒语音助手」）；
+  - 中间严格 16:9 主显示区：**`1248 × 702`**（`20px` 圆角微光边框；应用抽屉采用不透明底色遮罩彻底隔离底层 `SurfaceView` 防止亮色应用透出白边，顶栏极简为「全部应用 + 齿轮设置图标」，纯图标 `< / >` 翻页；内置 16:9 最近任务切换器 `RecentsView`，支持 `TaskSnapshot` 实时缩略图预览、点选直达主区、单任务关闭与一键全部清理；全套长按菜单、显示缩放 DPI 网格、桌面设置、Dock 槽位选择与卸载确认弹窗统一采用深色玻璃驾舱弹窗 `CockpitDialog`）；
+  - 右上导航卡片：`512 × 345`（空闲态展示日期 + 极简居中「回家 / 去公司」按钮 + 打开地图/搜目的地；支持在桌面设置中选择将 CPU 实时温度显示在导航卡片右上角、左侧 Dock 或关闭；自动读取高德车机版内已保存的家/公司地址 `KEY_TYPE=10045/10040`，若高德未设置则通过 `10046/12005` 反馈并提示在高德中设置；导航开始后自动切换为矢量转向箭头 + 距离 + 路名 + 剩余里程/时间/ETA + 进度条）；
   - 右下音乐卡片：`512 × 345`（封面动态取色渐变背景、歌名/歌手/来源角标、进度条与大尺寸播控；`VdInputBridge` 实时监听 `sdsdk816` 串口 AT 日志 `[MU0..4]/[MY]/[MA]/[MB]/[MI...]/[MT...]` 获取真实 A2DP 连接与曲目/进度状态，断连立即清空过期曲目并禁止假进度条推进；切歌/播放/暂停直接向 `/dev/goc_serial` 发送 `AT#MS/AT#MB/AT#MD/AT#ME`，彻底解决仅音乐模式 `HFP=0` 下原厂 `TechBTMusicManager` 拦截播控的问题，同时兼顾盒子本机媒体应用）。
-- **16:9 强约束与多点触控机制**：
-  - 由 `uid=1000 (system)` 伴生 Binder 服务 `tbox_vd_bridge`（`VdInputBridge`）持有 `1248 × 702` `VirtualDisplay` 并通过 `InputManager.createInputForwarder(displayId)` 零延迟转发完整多点触控与返回键；
-  - 全局 `TaskStackListener` 监听 Display 0，任何外部拉起或请求全屏的 App 都会被即时 `moveStackToDisplay` 迁入 `1248 × 702` 虚拟屏。
+- **16:9 强约束、每应用独立缩放（DPI）与多点触控机制**：
+  - 由 `uid=1000 (system)` 伴生 Binder 服务 `tbox_vd_bridge`（`VdInputBridge`）按目标缩放档位维护多槽位 `VirtualDisplay` 池（默认 `238 dpi` 为 `1248 × 702`，如 `160 dpi` 档位自动扩展虚拟分辨率至 `1856 × 1044 @ 238 dpi`），切换前先解绑旧 `VirtualDisplay` 并通过 `SurfaceHolder.setFixedSize(vdW, vdH)` 调整缓冲尺寸，再绑定目标虚拟屏由 `SurfaceFlinger` 硬件等比缩放至 `1248 × 702` 视口，同时在 `AppViewportManager` 按 `vdW/1248` 与 `vdH/702` 等比映射多点触控坐标；
+  - 采用虚拟分辨率缩放方案而非仅修改 `densityDpi`，因此对读取主屏 `Application` 密度或硬编码 `1080p` 像素布局的车机/TV 应用（如 `Bilibili Things` `com.bilibili.bilithings`，已默认预设 `160 dpi` 紧凑模式）同样生效，且切回高德导航（`238 dpi`）时原虚拟屏常驻后台零重载；
+  - 应用抽屉长按任意图标 →「调整显示缩放 / DPI」，或长按左上角时钟 →「调整当前应用显示缩放」，可在 `260 / 238(默认) / 220 / 200 / 180 / 160 / 140 / 120 dpi` 间单独调节并立即重载生效；
+  - 全局 `TaskStackListener` 监听 Display 0，任何外部拉起或请求全屏的 App 都会被即时 `moveStackToDisplay` 迁入对应缩放档位的 16:9 虚拟屏；同时对在虚拟屏内拉起的独立 `PackageInstaller` 安装任务自动通过 `moveTaskToStack` 提升到 Display 0 原生渲染（并在转发触摸时剥离 `FLAG_WINDOW_IS_OBSCURED/PARTIALLY_OBSCURED`），彻底避免 Android 9 安装器防劫持机制在 `ACTION_DOWN` 焦点切换触发 `onPause()` 禁用「安装」按钮的问题。
 
 ---
 

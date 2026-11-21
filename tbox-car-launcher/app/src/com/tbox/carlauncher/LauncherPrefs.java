@@ -13,8 +13,14 @@ public final class LauncherPrefs {
     private static final String KEY_DOCK_SLOT_PREFIX = "dock_slot_";
     private static final String KEY_AUTO_LAUNCH_PKG = "auto_launch_pkg";
     private static final String KEY_HIDDEN_PKGS = "hidden_pkgs";
+    private static final String KEY_APP_DPI_PREFIX = "app_dpi_";
+    private static final String KEY_CPU_TEMP_MODE = "cpu_temp_mode";
 
     public static final int DOCK_SLOT_COUNT = 4;
+    public static final int DEFAULT_DPI = 238;
+    public static final int CPU_TEMP_OFF = 0;
+    public static final int CPU_TEMP_DOCK = 1;
+    public static final int CPU_TEMP_NAV = 2;
 
     private final Context ctx;
     private final SharedPreferences sp;
@@ -49,6 +55,44 @@ public final class LauncherPrefs {
 
     public void setAutoLaunchPackage(String pkg) {
         sp.edit().putString(KEY_AUTO_LAUNCH_PKG, pkg == null ? "" : pkg).apply();
+    }
+
+    /**
+     * Returns custom per-app DPI, or 0 for system default (238 dpi).
+     * Bilibili Things defaults to 160 dpi (TV/car layout) unless user explicitly overrides it.
+     */
+    public int getAppDpiOverride(String pkg) {
+        if (pkg == null || pkg.isEmpty()) return 0;
+        String key = KEY_APP_DPI_PREFIX + pkg;
+        if (sp.contains(key)) {
+            return sp.getInt(key, 0);
+        }
+        if ("com.bilibili.bilithings".equals(pkg)) {
+            return 160;
+        }
+        return 0;
+    }
+
+    public int getEffectiveAppDpi(String pkg, int defaultDpi) {
+        int ov = getAppDpiOverride(pkg);
+        if (ov >= 100 && ov <= 420) return ov;
+        return defaultDpi > 0 ? defaultDpi : DEFAULT_DPI;
+    }
+
+    public void setAppDpiOverride(String pkg, int dpi) {
+        if (pkg == null || pkg.isEmpty()) return;
+        sp.edit().putInt(KEY_APP_DPI_PREFIX + pkg, dpi <= 0 ? 0 : dpi).apply();
+    }
+
+    public int getCpuTempMode() {
+        int m = sp.getInt(KEY_CPU_TEMP_MODE, CPU_TEMP_NAV);
+        if (m < CPU_TEMP_OFF || m > CPU_TEMP_NAV) return CPU_TEMP_NAV;
+        return m;
+    }
+
+    public void setCpuTempMode(int mode) {
+        if (mode < CPU_TEMP_OFF || mode > CPU_TEMP_NAV) mode = CPU_TEMP_OFF;
+        sp.edit().putInt(KEY_CPU_TEMP_MODE, mode).apply();
     }
 
     public Set<String> getHiddenPackages() {

@@ -9,7 +9,9 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.LayerDrawable;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -57,7 +59,6 @@ public class AppDrawerView extends LinearLayout {
     private final List<AppEntry> apps = new ArrayList<AppEntry>();
     private final LinearLayout gridHost;
     private final LinearLayout dotsRow;
-    private final TextView tvPageInfo;
     private final View btnPrevPage;
     private final View btnNextPage;
 
@@ -69,7 +70,13 @@ public class AppDrawerView extends LinearLayout {
         this.callbacks = cb;
         setOrientation(VERTICAL);
         setPadding(34, 24, 34, 20);
-        setBackground(UiUtil.cardDrawable(0xFF121722, 0xFF0B0F17, 20f, UiUtil.CARD_BORDER, 1));
+        // Base opaque canvas layer completely shields the underlying SurfaceView so bright apps
+        // (e.g. daytime AMapAuto / FileManager) never bleed a white edge through the 1px border.
+        LayerDrawable drawerBg = new LayerDrawable(new Drawable[]{
+            new ColorDrawable(UiUtil.BG_CANVAS),
+            UiUtil.cardDrawable(0xFF121722, 0xFF0B0F17, 20f, UiUtil.CARD_BORDER, 1)
+        });
+        setBackground(drawerBg);
 
         // Top header bar
         LinearLayout header = new LinearLayout(context);
@@ -81,29 +88,12 @@ public class AppDrawerView extends LinearLayout {
         tvTitle.setTextColor(0xFFF8FAFC);
         tvTitle.setTextSize(TypedValue.COMPLEX_UNIT_PX, 28f);
         tvTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
-        header.addView(tvTitle);
+        header.addView(tvTitle, new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
 
-        tvPageInfo = new TextView(context);
-        tvPageInfo.setTextColor(UiUtil.TEXT_SECONDARY);
-        tvPageInfo.setTextSize(TypedValue.COMPLEX_UNIT_PX, 19f);
-        LayoutParams pInfoLp = new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
-        pInfoLp.leftMargin = 16;
-        header.addView(tvPageInfo, pInfoLp);
-
-        TextView tvHint = new TextView(context);
-        tvHint.setText("长按图标可固定 Dock 或卸载");
-        tvHint.setTextColor(UiUtil.TEXT_MUTED);
-        tvHint.setTextSize(TypedValue.COMPLEX_UNIT_PX, 17f);
-        LayoutParams hintLp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-        hintLp.rightMargin = 18;
-        header.addView(tvHint, hintLp);
-
-        TextView btnSettings = new TextView(context);
-        btnSettings.setText("桌面设置");
-        btnSettings.setTextColor(0xFFE2E8F0);
-        btnSettings.setTextSize(TypedValue.COMPLEX_UNIT_PX, 19f);
-        btnSettings.setPadding(22, 10, 22, 10);
-        btnSettings.setBackground(UiUtil.solidRounded(0x16FFFFFF, 16f, 0, 0));
+        FrameLayout btnSettings = new FrameLayout(context);
+        btnSettings.setBackground(UiUtil.solidRounded(0x16FFFFFF, 14f, 0x16FFFFFF, 1));
+        btnSettings.addView(new GearIconView(context, 0xFFE2E8F0),
+            new FrameLayout.LayoutParams(24, 24, Gravity.CENTER));
         btnSettings.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -111,7 +101,7 @@ public class AppDrawerView extends LinearLayout {
             }
         });
         UiUtil.addPressScale(btnSettings);
-        header.addView(btnSettings);
+        header.addView(btnSettings, new LayoutParams(46, 46));
 
         addView(header, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
@@ -250,8 +240,6 @@ public class AppDrawerView extends LinearLayout {
             gridHost.addView(row, rowLp);
         }
 
-        tvPageInfo.setText((currentPage + 1) + " / " + totalPages + " 页 · 共 " + apps.size() + " 个应用");
-
         dotsRow.removeAllViews();
         for (int i = 0; i < totalPages; i++) {
             View dot = new View(ctx);
@@ -358,6 +346,40 @@ public class AppDrawerView extends LinearLayout {
             }
             c.drawPath(path, paint);
             c.restore();
+        }
+    }
+
+    private static final class GearIconView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        GearIconView(Context ctx, int color) {
+            super(ctx);
+            paint.setColor(color);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeJoin(Paint.Join.ROUND);
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float w = getWidth();
+            float h = getHeight();
+            float s = Math.min(w, h);
+            if (s <= 0) return;
+            float cx = w * 0.5f;
+            float cy = h * 0.5f;
+            paint.setStrokeWidth(Math.max(2.1f, s * 0.105f));
+            float rIn = s * 0.145f;
+            float rMid = s * 0.285f;
+            float rOut = s * 0.405f;
+            c.drawCircle(cx, cy, rIn, paint);
+            c.drawCircle(cx, cy, rMid, paint);
+            for (int i = 0; i < 8; i++) {
+                double rad = Math.toRadians(i * 45.0);
+                float dx = (float) Math.cos(rad);
+                float dy = (float) Math.sin(rad);
+                c.drawLine(cx + dx * rMid, cy + dy * rMid, cx + dx * rOut, cy + dy * rOut, paint);
+            }
         }
     }
 

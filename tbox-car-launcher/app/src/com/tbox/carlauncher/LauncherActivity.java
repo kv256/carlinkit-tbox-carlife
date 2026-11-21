@@ -1,14 +1,13 @@
 package com.tbox.carlauncher;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
+import android.graphics.Bitmap;
 import android.net.ConnectivityManager;
 import android.net.Uri;
 import android.os.Bundle;
@@ -18,13 +17,17 @@ import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.util.TypedValue;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Main 1920x720 CarPlay-style Cockpit Launcher (Scheme B exact pixel geometry):
@@ -37,6 +40,7 @@ public class LauncherActivity extends Activity {
     private static final String TAG = "TboxCarLauncher";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final ExecutorService bgExecutor = Executors.newSingleThreadExecutor();
     private LauncherPrefs prefs;
     private AMapBridge amapBridge;
     private MediaHub mediaHub;
@@ -45,11 +49,43 @@ public class LauncherActivity extends Activity {
     private DockView dockView;
     private FrameLayout centerContainer;
     private AppDrawerView appDrawerView;
+    private RecentsView recentsView;
     private NavWidgetView navWidgetView;
     private MusicWidgetView musicWidgetView;
 
     private boolean drawerVisible = true;
+    private boolean recentsVisible = false;
     private boolean hasLaunchedAnyApp = false;
+    private float lastCpuTempC = -1f;
+
+    private final Runnable cpuTempPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            final int mode = prefs != null ? prefs.getCpuTempMode() : LauncherPrefs.CPU_TEMP_OFF;
+            if (mode == LauncherPrefs.CPU_TEMP_OFF) {
+                applyCpuTempUi(mode, -1f);
+                return;
+            }
+            bgExecutor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final float tempC = viewport != null ? viewport.getCpuTempCelsius() : -1f;
+                    handler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (tempC > 0f) lastCpuTempC = tempC;
+                            int curMode = prefs != null ? prefs.getCpuTempMode() : LauncherPrefs.CPU_TEMP_OFF;
+                            applyCpuTempUi(curMode, lastCpuTempC);
+                            if (curMode != LauncherPrefs.CPU_TEMP_OFF) {
+                                handler.removeCallbacks(cpuTempPollRunnable);
+                                handler.postDelayed(cpuTempPollRunnable, 3000L);
+                            }
+                        }
+                    });
+                }
+            });
+        }
+    };
 
     private final BroadcastReceiver sysReceiver = new BroadcastReceiver() {
         @Override
@@ -173,6 +209,7 @@ public class LauncherActivity extends Activity {
 
             @Override
             public void onHomeToggleClicked() {
+                if (recentsVisible) setRecentsVisible(false);
                 if (drawerVisible && hasLaunchedAnyApp) {
                     setDrawerVisible(false);
                 } else {
@@ -182,11 +219,18 @@ public class LauncherActivity extends Activity {
 
             @Override
             public void onBackClicked() {
-                if (drawerVisible) {
+                if (recentsVisible) {
+                    setRecentsVisible(false);
+                } else if (drawerVisible) {
                     if (hasLaunchedAnyApp) setDrawerVisible(false);
                 } else if (viewport != null) {
                     viewport.sendBackKey();
                 }
+            }
+
+            @Override
+            public void onBackLongClicked() {
+                setRecentsVisible(!recentsVisible);
             }
 
             @Override
@@ -213,9 +257,10 @@ public class LauncherActivity extends Activity {
         centerLp.topMargin = padTop;
         root.addView(centerContainer, centerLp);
 
-        viewport = new AppViewportManager(this, centerContainer, new AppViewportManager.Listener() {
+        viewport = new AppViewportManager(this, centerContainer, prefs, new AppViewportManager.Listener() {
             @Override
             public void onViewportReady(int virtualDisplayId) {
+                refreshCpuTempMonitor();
                 String autoPkg = prefs.getAutoLaunchPackage();
                 if (!TextUtils.isEmpty(autoPkg) && !hasLaunchedAnyApp) {
                     openAppInViewport(autoPkg);
@@ -265,6 +310,54 @@ public class LauncherActivity extends Activity {
         });
         appDrawerView.reloadApps(prefs);
         centerContainer.addView(appDrawerView,
+            new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        // CarPlay-style 16:9 Recent Apps Switcher stacked cleanly above viewport & drawer
+        recentsView = new RecentsView(this, prefs, new RecentsView.Callbacks() {
+            @Override
+            public void onAppChosen(String packageName) {
+                setRecentsVisible(false);
+                openAppInViewport(packageName);
+            }
+
+            @Override
+            public void onTaskRemoved(final int taskId, final String packageName) {
+                bgExecutor.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (viewport != null) viewport.removeRecentTask(taskId);
+                    }
+                });
+            }
+
+            @Override
+            public void onClearAll(final List<AppViewportManager.RecentTaskItem> items) {
+                bgExecutor.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (viewport != null && items != null) {
+                            for (AppViewportManager.RecentTaskItem it : items) {
+                                viewport.removeRecentTask(it.taskId);
+                            }
+                        }
+                    }
+                });
+                Toast.makeText(LauncherActivity.this, "已清理全部最近任务", Toast.LENGTH_SHORT).show();
+            }
+
+            @Override
+            public void onCloseRequested() {
+                setRecentsVisible(false);
+            }
+
+            @Override
+            public void onOpenDrawerRequested() {
+                setRecentsVisible(false);
+                setDrawerVisible(true);
+            }
+        });
+        recentsView.setVisibility(View.GONE);
+        centerContainer.addView(recentsView,
             new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
         // 3. Top-Right Navigation Widget (512x345)
@@ -340,11 +433,13 @@ public class LauncherActivity extends Activity {
 
         setContentView(root);
         setDrawerVisible(true);
+        refreshCpuTempMonitor();
     }
 
     private void openAppInViewport(String pkg) {
         if (TextUtils.isEmpty(pkg) || viewport == null) return;
         hasLaunchedAnyApp = true;
+        setRecentsVisible(false);
         setDrawerVisible(false);
         boolean ok = viewport.launchPackage(pkg);
         if (!ok && viewport.isReady()) {
@@ -353,12 +448,46 @@ public class LauncherActivity extends Activity {
     }
 
     private void setDrawerVisible(boolean show) {
+        if (show && recentsVisible) setRecentsVisible(false);
         drawerVisible = show;
         if (appDrawerView != null) {
             appDrawerView.setVisibility(show ? View.VISIBLE : View.GONE);
         }
         if (dockView != null) {
-            dockView.setActiveState(viewport != null ? viewport.getCurrentAppPackage() : "", show);
+            dockView.setActiveState(viewport != null ? viewport.getCurrentAppPackage() : "", show || recentsVisible);
+        }
+    }
+
+    private void setRecentsVisible(boolean show) {
+        recentsVisible = show;
+        if (recentsView != null) {
+            if (show) {
+                recentsView.setVisibility(View.VISIBLE);
+                recentsView.reload(viewport, viewport != null ? viewport.getCurrentAppPackage() : "");
+            } else {
+                recentsView.setVisibility(View.GONE);
+            }
+        }
+        if (dockView != null) {
+            dockView.setActiveState(viewport != null ? viewport.getCurrentAppPackage() : "", drawerVisible || show);
+        }
+    }
+
+    private void refreshCpuTempMonitor() {
+        handler.removeCallbacks(cpuTempPollRunnable);
+        int mode = prefs != null ? prefs.getCpuTempMode() : LauncherPrefs.CPU_TEMP_OFF;
+        applyCpuTempUi(mode, lastCpuTempC);
+        if (mode != LauncherPrefs.CPU_TEMP_OFF) {
+            handler.post(cpuTempPollRunnable);
+        }
+    }
+
+    private void applyCpuTempUi(int mode, float tempC) {
+        if (dockView != null) {
+            dockView.setCpuTemp(mode == LauncherPrefs.CPU_TEMP_DOCK, tempC);
+        }
+        if (navWidgetView != null) {
+            navWidgetView.setCpuTemp(mode == LauncherPrefs.CPU_TEMP_NAV, tempC);
         }
     }
 
@@ -377,60 +506,138 @@ public class LauncherActivity extends Activity {
     private void showDockSlotPicker(final int slot) {
         final List<AppDrawerView.AppEntry> all = appDrawerView.getApps();
         if (all.isEmpty()) return;
-        String[] names = new String[all.size()];
-        for (int i = 0; i < all.size(); i++) {
-            names[i] = all.get(i).label;
-        }
-        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-            .setTitle("设置左侧 Dock 第 " + (slot + 1) + " 个快捷应用")
-            .setItems(names, new DialogInterface.OnClickListener() {
-                @Override
-                public void onClick(DialogInterface d, int which) {
-                    prefs.setDockPackage(slot, all.get(which).packageName);
-                    dockView.setDockPackages(prefs.getDockPackages());
-                }
-            })
-            .setNegativeButton("取消", null)
-            .show();
+        String[] dockPkgs = prefs.getDockPackages();
+        String curPkg = (dockPkgs != null && slot < dockPkgs.length) ? dockPkgs[slot] : "";
+        final CockpitDialog.Handle h = CockpitDialog.create(
+            this, 680, null, CockpitDialog.ICON_SLIDERS, UiUtil.ACCENT_BLUE,
+            "设置 Dock 第 " + (slot + 1) + " 位快捷应用",
+            "点击下方应用图标即可替换该快捷槽位",
+            "Dock " + (slot + 1)
+        );
+        h.body.addView(CockpitDialog.makeAppGridPicker(this, all, curPkg, new CockpitDialog.AppPickCallback() {
+            @Override
+            public void onAppPicked(AppDrawerView.AppEntry app) {
+                prefs.setDockPackage(slot, app.packageName);
+                dockView.setDockPackages(prefs.getDockPackages());
+                h.dismiss();
+                Toast.makeText(LauncherActivity.this, "已固定「" + app.label + "」到 Dock " + (slot + 1), Toast.LENGTH_SHORT).show();
+            }
+        }));
+        h.show();
     }
 
     private void showAppOptionsDialog(final AppDrawerView.AppEntry app) {
         final boolean canUninstall = isUserInstalledApp(app.packageName);
-        String[] items = canUninstall
-            ? new String[]{
-                "固定到左侧 Dock 第 1 位",
-                "固定到左侧 Dock 第 2 位",
-                "固定到左侧 Dock 第 3 位",
-                "固定到左侧 Dock 第 4 位",
-                "设为开机默认在主区打开",
-                "卸载应用（删除）"
-            }
-            : new String[]{
-                "固定到左侧 Dock 第 1 位",
-                "固定到左侧 Dock 第 2 位",
-                "固定到左侧 Dock 第 3 位",
-                "固定到左侧 Dock 第 4 位",
-                "设为开机默认在主区打开"
-            };
-        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-            .setTitle(app.label)
-            .setItems(items, new DialogInterface.OnClickListener() {
+        int curDpi = prefs.getAppDpiOverride(app.packageName);
+        String dpiPill = curDpi > 0 ? (curDpi + " dpi") : "默认 238";
+        boolean isAutoLaunch = app.packageName.equals(prefs.getAutoLaunchPackage());
+
+        final CockpitDialog.Handle h = CockpitDialog.create(
+            this, 640, app.icon, 0, 0,
+            app.label,
+            app.packageName,
+            curDpi > 0 ? (curDpi + " dpi") : null
+        );
+
+        h.body.addView(CockpitDialog.makeSectionLabel(this, "固定到左侧 Dock 快捷栏"));
+        h.body.addView(CockpitDialog.makeDockSlotBar(this, prefs.getDockPackages(), app.packageName,
+            new CockpitDialog.SlotCallback() {
                 @Override
-                public void onClick(DialogInterface d, int which) {
-                    if (which < 4) {
-                        prefs.setDockPackage(which, app.packageName);
-                        dockView.setDockPackages(prefs.getDockPackages());
-                        Toast.makeText(LauncherActivity.this, "已固定 " + app.label + " 到 Dock " + (which + 1), Toast.LENGTH_SHORT).show();
-                    } else if (which == 4) {
+                public void onSlotSelected(int slotIndex) {
+                    prefs.setDockPackage(slotIndex, app.packageName);
+                    dockView.setDockPackages(prefs.getDockPackages());
+                    h.dismiss();
+                    Toast.makeText(LauncherActivity.this,
+                        "已固定「" + app.label + "」到 Dock " + (slotIndex + 1), Toast.LENGTH_SHORT).show();
+                }
+            }));
+
+        h.body.addView(CockpitDialog.makeSectionLabel(this, "显示与启动选项"));
+        h.body.addView(CockpitDialog.makeActionRow(
+            this, CockpitDialog.ICON_SCALE, UiUtil.ACCENT_BLUE,
+            "调整显示缩放 / DPI",
+            "独立缩放界面字体与布局比例，不影响其它应用",
+            dpiPill, UiUtil.ACCENT_BLUE, false,
+            new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    h.dismiss();
+                    showAppDpiDialog(app.packageName, app.label, app.icon);
+                }
+            }
+        ));
+
+        h.body.addView(CockpitDialog.makeActionRow(
+            this, CockpitDialog.ICON_BOOT, isAutoLaunch ? UiUtil.ACCENT_GREEN : UiUtil.ACCENT_AMBER,
+            isAutoLaunch ? "已设为开机默认打开" : "设为开机默认在主区打开",
+            isAutoLaunch ? "点击恢复为开机显示应用抽屉" : "开机自动在 16:9 主显示区启动此应用",
+            isAutoLaunch ? "当前默认" : null, UiUtil.ACCENT_GREEN, false,
+            new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    h.dismiss();
+                    if (isAutoLaunch) {
+                        prefs.setAutoLaunchPackage("");
+                        Toast.makeText(LauncherActivity.this, "已取消开机默认，开机将显示应用抽屉", Toast.LENGTH_SHORT).show();
+                    } else {
                         prefs.setAutoLaunchPackage(app.packageName);
-                        Toast.makeText(LauncherActivity.this, "开机将自动在 16:9 主区打开 " + app.label, Toast.LENGTH_SHORT).show();
-                    } else if (which == 5 && canUninstall) {
+                        Toast.makeText(LauncherActivity.this, "开机将自动在 16:9 主区打开「" + app.label + "」", Toast.LENGTH_SHORT).show();
+                    }
+                }
+            }
+        ));
+
+        if (canUninstall) {
+            h.body.addView(CockpitDialog.makeActionRow(
+                this, CockpitDialog.ICON_TRASH, 0xFFF87171,
+                "卸载应用",
+                "从车机盒子中永久删除此第三方应用",
+                null, 0, true,
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        h.dismiss();
                         confirmUninstallApp(app);
                     }
                 }
-            })
-            .setNegativeButton("取消", null)
-            .show();
+            ));
+        }
+
+        h.show();
+    }
+
+    private void showAppDpiDialog(final String pkg, final String label, Bitmap icon) {
+        if (TextUtils.isEmpty(pkg)) return;
+        Bitmap appIcon = icon != null ? icon : CockpitDialog.loadRoundedIcon(this, pkg);
+        int cur = prefs.getAppDpiOverride(pkg);
+        final CockpitDialog.Handle h = CockpitDialog.create(
+            this, 680, appIcon, CockpitDialog.ICON_SCALE, UiUtil.ACCENT_BLUE,
+            "「" + label + "」显示缩放",
+            "虚拟分辨率硬件缩放 · 选择后仅重启此应用立即生效",
+            cur > 0 ? (cur + " dpi") : "默认 238"
+        );
+        h.body.addView(CockpitDialog.makeDpiGrid(this, cur, new CockpitDialog.DpiCallback() {
+            @Override
+            public void onDpiSelected(int chosen) {
+                prefs.setAppDpiOverride(pkg, chosen);
+                h.dismiss();
+                if (viewport != null) {
+                    viewport.forceStopPackage(pkg);
+                }
+                Toast.makeText(
+                    LauncherActivity.this,
+                    "已将「" + label + "」设为 " + (chosen > 0 ? (chosen + " dpi") : "默认 238 dpi") + "，正在重启应用…",
+                    Toast.LENGTH_SHORT
+                ).show();
+                handler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        openAppInViewport(pkg);
+                    }
+                }, 250L);
+            }
+        }));
+        h.show();
     }
 
     private boolean isUserInstalledApp(String pkg) {
@@ -446,15 +653,34 @@ public class LauncherActivity extends Activity {
     }
 
     private void confirmUninstallApp(final AppDrawerView.AppEntry app) {
-        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-            .setTitle("卸载应用")
-            .setMessage("确定要删除「" + app.label + "」(" + app.packageName + ") 吗？")
-            .setPositiveButton("确定卸载", new DialogInterface.OnClickListener() {
+        final CockpitDialog.Handle h = CockpitDialog.create(
+            this, 560, app.icon, CockpitDialog.ICON_TRASH, 0xFFF87171,
+            "确定卸载「" + app.label + "」？",
+            app.packageName,
+            null
+        );
+        TextView msg = new TextView(this);
+        msg.setText("卸载后将移除该应用及其本地数据，确认要继续删除吗？");
+        msg.setTextColor(0xFFCBD5E1);
+        msg.setTextSize(TypedValue.COMPLEX_UNIT_PX, 18f);
+        msg.setLineSpacing(6f, 1f);
+        h.body.addView(msg);
+
+        h.body.addView(CockpitDialog.makeButtonBar(
+            this, "取消", "确定卸载", true,
+            new View.OnClickListener() {
                 @Override
-                public void onClick(DialogInterface d, int w) {
+                public void onClick(View v) {
+                    h.dismiss();
+                }
+            },
+            new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    h.dismiss();
                     boolean ok = viewport != null && viewport.uninstallUserPackage(app.packageName);
                     if (ok) {
-                        Toast.makeText(LauncherActivity.this, "正在卸载 " + app.label + "…", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(LauncherActivity.this, "正在卸载「" + app.label + "」…", Toast.LENGTH_SHORT).show();
                         handler.postDelayed(new Runnable() {
                             @Override
                             public void run() {
@@ -472,41 +698,106 @@ public class LauncherActivity extends Activity {
                         }
                     }
                 }
-            })
-            .setNegativeButton("取消", null)
-            .show();
+            }
+        ));
+        h.show();
     }
 
     private void showLauncherSettingsDialog() {
         String auto = prefs.getAutoLaunchPackage();
-        String autoLabel = TextUtils.isEmpty(auto) ? "显示应用网格" : UiUtil.getAppLabel(this, auto);
-        String[] items = new String[]{
-            "开机默认主区：" + autoLabel + "（点击切换为应用网格 / 高德）",
-            "打开 USB / 音频切换工具 (TboxUsbSwitch)",
-            "打开系统设置"
-        };
-        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-            .setTitle("CarPlay 车机桌面设置")
-            .setItems(items, new DialogInterface.OnClickListener() {
+        final String autoLabel = TextUtils.isEmpty(auto) ? "应用抽屉" : UiUtil.getAppLabel(this, auto);
+        final String curPkg = viewport != null ? viewport.getCurrentAppPackage() : "";
+        final String curLabel = !TextUtils.isEmpty(curPkg) ? UiUtil.getAppLabel(this, curPkg) : "";
+        int curDpi = !TextUtils.isEmpty(curPkg)
+            ? prefs.getEffectiveAppDpi(curPkg, LauncherPrefs.DEFAULT_DPI) : LauncherPrefs.DEFAULT_DPI;
+
+        final CockpitDialog.Handle h = CockpitDialog.create(
+            this, 710, null, CockpitDialog.ICON_GEAR, UiUtil.ACCENT_BLUE,
+            "车机桌面设置",
+            "1920×720 16:9 驾舱桌面 · 长按时钟随时打开",
+            null
+        );
+
+        h.body.addView(CockpitDialog.makeSegmentedRow(
+            this, CockpitDialog.ICON_TEMP, 0xFF38BDF8,
+            "CPU 温度显示",
+            "实时监测盒子芯片温度",
+            new String[]{"关闭", "左侧 Dock", "导航卡片"},
+            prefs.getCpuTempMode(),
+            new CockpitDialog.SegmentCallback() {
                 @Override
-                public void onClick(DialogInterface d, int which) {
-                    if (which == 0) {
-                        if (TextUtils.isEmpty(prefs.getAutoLaunchPackage())) {
-                            prefs.setAutoLaunchPackage(AMapBridge.AMAP_PKG);
-                            Toast.makeText(LauncherActivity.this, "开机默认打开：高德地图", Toast.LENGTH_SHORT).show();
-                        } else {
-                            prefs.setAutoLaunchPackage("");
-                            Toast.makeText(LauncherActivity.this, "开机默认显示：应用抽屉", Toast.LENGTH_SHORT).show();
-                        }
-                    } else if (which == 1) {
-                        openAppInViewport("com.tbox.usbswitch");
-                    } else if (which == 2) {
-                        openAppInViewport("com.android.settings");
+                public void onSegmentSelected(int index) {
+                    prefs.setCpuTempMode(index);
+                    refreshCpuTempMonitor();
+                }
+            }
+        ));
+
+        if (!TextUtils.isEmpty(curPkg)) {
+            h.body.addView(CockpitDialog.makeActionRow(
+                this, CockpitDialog.ICON_SCALE, UiUtil.ACCENT_BLUE,
+                "调整「" + curLabel + "」显示缩放",
+                "单独设置当前主区应用的界面字体与显示比例",
+                curDpi + " dpi", UiUtil.ACCENT_BLUE, false,
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        h.dismiss();
+                        showAppDpiDialog(curPkg, curLabel, null);
                     }
                 }
-            })
-            .setNegativeButton("关闭", null)
-            .show();
+            ));
+        }
+
+        h.body.addView(CockpitDialog.makeActionRow(
+            this, CockpitDialog.ICON_BOOT, UiUtil.ACCENT_AMBER,
+            "开机默认主区显示",
+            "点击在「高德地图」与「应用抽屉」之间切换",
+            autoLabel, UiUtil.ACCENT_AMBER, false,
+            new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    h.dismiss();
+                    if (TextUtils.isEmpty(prefs.getAutoLaunchPackage())) {
+                        prefs.setAutoLaunchPackage(AMapBridge.AMAP_PKG);
+                        Toast.makeText(LauncherActivity.this, "开机默认打开：高德地图", Toast.LENGTH_SHORT).show();
+                    } else {
+                        prefs.setAutoLaunchPackage("");
+                        Toast.makeText(LauncherActivity.this, "开机默认显示：应用抽屉", Toast.LENGTH_SHORT).show();
+                    }
+                }
+            }
+        ));
+
+        h.body.addView(CockpitDialog.makeActionRow(
+            this, CockpitDialog.ICON_USB, 0xFFA78BFA,
+            "USB 模式与音频通道切换",
+            "打开 TboxUsbSwitch（CarLife / CarPlay / 音频分流）",
+            null, 0, false,
+            new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    h.dismiss();
+                    openAppInViewport("com.tbox.usbswitch");
+                }
+            }
+        ));
+
+        h.body.addView(CockpitDialog.makeActionRow(
+            this, CockpitDialog.ICON_SLIDERS, UiUtil.ACCENT_GREEN,
+            "Android 系统设置",
+            "管理 Wi-Fi、蓝牙、应用与设备系统选项",
+            null, 0, false,
+            new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    h.dismiss();
+                    openAppInViewport("com.android.settings");
+                }
+            }
+        ));
+
+        h.show();
     }
 
     @Override
@@ -533,21 +824,26 @@ public class LauncherActivity extends Activity {
             viewport.setActive(true);
             viewport.onLocationChanged();
         }
+        refreshCpuTempMonitor();
     }
 
     @Override
     protected void onPause() {
         super.onPause();
+        handler.removeCallbacks(cpuTempPollRunnable);
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        handler.removeCallbacksAndMessages(null);
+        bgExecutor.shutdownNow();
         try { unregisterReceiver(sysReceiver); } catch (Throwable ignored) {}
         try { unregisterReceiver(pkgReceiver); } catch (Throwable ignored) {}
         if (amapBridge != null) amapBridge.stop();
         if (mediaHub != null) mediaHub.stop();
         if (musicWidgetView != null) musicWidgetView.release();
+        if (recentsView != null) recentsView.release();
         if (viewport != null) viewport.release();
     }
 
@@ -563,7 +859,9 @@ public class LauncherActivity extends Activity {
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_BACK) {
-            if (drawerVisible && hasLaunchedAnyApp) {
+            if (recentsVisible) {
+                setRecentsVisible(false);
+            } else if (drawerVisible && hasLaunchedAnyApp) {
                 setDrawerVisible(false);
             } else if (!drawerVisible && viewport != null) {
                 viewport.sendBackKey();

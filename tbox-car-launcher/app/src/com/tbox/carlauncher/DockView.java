@@ -37,14 +37,17 @@ public class DockView extends LinearLayout {
         void onDockAppLongClicked(int slot);
         void onHomeToggleClicked();
         void onBackClicked();
+        void onBackLongClicked();
         void onVoiceClicked();
         void onSettingsLongClicked();
     }
 
     private final Callbacks callbacks;
     private final TextView tvClock;
+    private final LinearLayout statusRow;
     private final StatusVectorView wifiIcon;
     private final StatusVectorView btIcon;
+    private final TextView tvCpuTemp;
 
     private final FrameLayout[] slotContainers = new FrameLayout[LauncherPrefs.DOCK_SLOT_COUNT];
     private final View[] slotIndicators = new View[LauncherPrefs.DOCK_SLOT_COUNT];
@@ -82,7 +85,7 @@ public class DockView extends LinearLayout {
         });
         addView(tvClock, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
-        LinearLayout statusRow = new LinearLayout(context);
+        statusRow = new LinearLayout(context);
         statusRow.setOrientation(HORIZONTAL);
         statusRow.setGravity(Gravity.CENTER);
         LayoutParams stLp = new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
@@ -96,6 +99,18 @@ public class DockView extends LinearLayout {
         btLp.leftMargin = 12;
         statusRow.addView(btIcon, btLp);
         addView(statusRow, stLp);
+
+        tvCpuTemp = new TextView(context);
+        tvCpuTemp.setTextColor(0xFF7DD3FC);
+        tvCpuTemp.setTextSize(TypedValue.COMPLEX_UNIT_PX, 15.5f);
+        tvCpuTemp.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        tvCpuTemp.setGravity(Gravity.CENTER);
+        tvCpuTemp.setPadding(8, 3, 8, 3);
+        tvCpuTemp.setBackground(UiUtil.solidRounded(0x1838BDF8, 10f, 0, 0));
+        tvCpuTemp.setVisibility(GONE);
+        LayoutParams cpuLp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+        cpuLp.bottomMargin = 10;
+        addView(tvCpuTemp, cpuLp);
 
         addDivider(context);
 
@@ -151,14 +166,21 @@ public class DockView extends LinearLayout {
 
         addDivider(context);
 
-        // 3. Bottom system controls: Back + merged App Drawer (short press) / Voice Assistant (long press)
+        // 3. Bottom system controls: Back (long-press Recents) + App Drawer (long-press Voice)
         View backBtn = makeUtilButton(context, new DockGlyphView(context, DockGlyphView.BACK, 0xFFE2E8F0),
             new OnClickListener() {
                 @Override
                 public void onClick(View v) {
                     if (callbacks != null) callbacks.onBackClicked();
                 }
-            }, null);
+            },
+            new OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    if (callbacks != null) callbacks.onBackLongClicked();
+                    return true;
+                }
+            });
         LayoutParams utilLp1 = new LayoutParams(78, 58);
         utilLp1.topMargin = 14;
         addView(backBtn, utilLp1);
@@ -235,6 +257,27 @@ public class DockView extends LinearLayout {
             this.btA2dpConnected = connected;
             refreshClockAndStatus();
         }
+    }
+
+    public void setCpuTemp(boolean visible, float tempC) {
+        LayoutParams stLp = (LayoutParams) statusRow.getLayoutParams();
+        if (stLp != null) {
+            int wantBottom = visible ? 6 : 14;
+            if (stLp.bottomMargin != wantBottom) {
+                stLp.bottomMargin = wantBottom;
+                statusRow.setLayoutParams(stLp);
+            }
+        }
+        if (!visible) {
+            tvCpuTemp.setVisibility(GONE);
+            return;
+        }
+        tvCpuTemp.setVisibility(VISIBLE);
+        int color = UiUtil.cpuTempColor(tempC);
+        int bg = (color & 0x00FFFFFF) | 0x20000000;
+        tvCpuTemp.setText(UiUtil.formatCpuTemp(tempC));
+        tvCpuTemp.setTextColor(color);
+        tvCpuTemp.setBackground(UiUtil.solidRounded(bg, 10f, 0, 0));
     }
 
     private void updateHighlights() {

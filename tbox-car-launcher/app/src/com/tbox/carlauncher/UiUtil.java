@@ -201,4 +201,15 @@ public final class UiUtil {
         long s = totalSec % 60L;
         return String.format(java.util.Locale.US, "%d:%02d", m, s);
     }
+
+    public static int cpuTempColor(float tempC) {
+        if (tempC >= 80f) return 0xFFF87171;
+        if (tempC >= 65f) return 0xFFFBBF24;
+        return 0xFF7DD3FC;
+    }
+
+    public static String formatCpuTemp(float tempC) {
+        if (tempC <= 0f) return "--°C";
+        return String.format(java.util.Locale.US, "%.1f°C", tempC);
+    }
 }
