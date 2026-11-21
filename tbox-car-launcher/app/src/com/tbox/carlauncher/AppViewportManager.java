@@ -115,7 +115,16 @@ public final class AppViewportManager {
     private final Runnable completeResizeAttachRunnable = new Runnable() {
         @Override
         public void run() {
-            if (pendingDpi <= 0 || lastSurface == null || lastW <= 0 || lastH <= 0) return;
+            if (pendingDpi <= 0) return;
+            if (lastSurface == null || lastW <= 0 || lastH <= 0) {
+                // Surface was destroyed while waiting for resize (e.g. Launcher covered by
+                // PackageInstaller); clear pendingDpi so confinement checks never stall.
+                pendingDpi = -1;
+                pendingVdW = 0;
+                pendingVdH = 0;
+                pendingAfterResize = null;
+                return;
+            }
             int targetDpi = pendingDpi;
             Runnable after = pendingAfterResize;
             pendingDpi = -1;
@@ -203,7 +212,18 @@ public final class AppViewportManager {
                         surfaceBufW = w;
                         surfaceBufH = h;
                     }
-                    if (pendingDpi <= 0) {
+                    int wantDpi = activeDpi > 0 ? activeDpi : getDisplayDensityDpi();
+                    int wantW = VdInputBridge.computeScaledWidth(w, getDisplayDensityDpi(), wantDpi);
+                    int wantH = VdInputBridge.computeScaledHeight(wantW);
+                    if (pendingDpi <= 0 && (surfaceBufW != wantW || surfaceBufH != wantH)) {
+                        pendingDpi = wantDpi;
+                        pendingVdW = wantW;
+                        pendingVdH = wantH;
+                        pendingAfterResize = null;
+                        surfaceView.getHolder().setFixedSize(wantW, wantH);
+                        mainHandler.removeCallbacks(completeResizeAttachRunnable);
+                        mainHandler.postDelayed(completeResizeAttachRunnable, 220L);
+                    } else if (pendingDpi <= 0) {
                         attachSurfaceToBridge(lastSurface, w, h);
                     }
                 }
@@ -237,6 +257,10 @@ public final class AppViewportManager {
             @Override
             public void surfaceDestroyed(SurfaceHolder holder) {
                 mainHandler.removeCallbacks(completeResizeAttachRunnable);
+                pendingDpi = -1;
+                pendingVdW = 0;
+                pendingVdH = 0;
+                pendingAfterResize = null;
                 lastSurface = null;
                 surfaceBufW = 0;
                 surfaceBufH = 0;
@@ -418,16 +442,19 @@ public final class AppViewportManager {
         IBinder b = getBridge();
         if (b == null || pkg == null || pkg.isEmpty()) return false;
         Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
         try {
             data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
             data.writeString(pkg);
-            b.transact(VdInputBridge.TX_UNINSTALL, data, null, IBinder.FLAG_ONEWAY);
-            return true;
+            b.transact(VdInputBridge.TX_UNINSTALL, data, reply, 0);
+            reply.readException();
+            return reply.readInt() != 0;
         } catch (Throwable t) {
             Log.w(TAG, "TX_UNINSTALL failed for " + pkg, t);
             return false;
         } finally {
             data.recycle();
+            reply.recycle();
         }
     }
 
@@ -716,6 +743,7 @@ public final class AppViewportManager {
             String topOnVd = null;
             String fallbackVdPkg = null;
             int escapeStackId = -1;
+            int escapeTaskId = -1;
             String escapePkg = null;
             int promoteTaskId = -1;
             String promotePkg = null;
@@ -748,9 +776,13 @@ public final class AppViewportManager {
                     continue;
                 }
                 if (dispId == 0 && launcherStackId < 0 && taskNames != null) {
-                    for (String tn : taskNames) {
+                    for (int i = 0; i < taskNames.length; i++) {
+                        String tn = taskNames[i];
                         if (tn != null && tn.startsWith("com.tbox.carlauncher/")) {
                             launcherStackId = stackId;
+                            if (taskIds != null && i < taskIds.length) {
+                                launcherTaskId = taskIds[i];
+                            }
                             break;
                         }
                     }
@@ -780,6 +812,9 @@ public final class AppViewportManager {
                     if (escapeStackId < 0) {
                         escapeStackId = stackId;
                         escapePkg = pkg;
+                        if (taskIds != null && taskIds.length > 0) {
+                            escapeTaskId = taskIds[taskIds.length - 1];
+                        }
                     }
                 }
             }
@@ -814,20 +849,27 @@ public final class AppViewportManager {
                 if (now - lastConfineMs > 250L) {
                     lastConfineMs = now;
                     final int fStack = escapeStackId;
+                    final int fTask = escapeTaskId;
                     final String fPkg = escapePkg;
                     final int fLauncherTask = launcherTaskId;
                     final int fLauncherStack = launcherStackId;
-                    ensureDpiForPackage(fPkg, new Runnable() {
+                    final int baseDpi = getDisplayDensityDpi();
+                    final int fTargetDpi = prefs != null
+                        ? prefs.getEffectiveAppDpi(fPkg, baseDpi)
+                        : baseDpi;
+                    final Runnable dispatchMove = new Runnable() {
                         @Override
                         public void run() {
                             Log.i(TAG, "Confining external app " + fPkg + " (stack=" + fStack
-                                + ") from display 0 -> 16:9 display " + virtualDisplayId);
+                                + ", task=" + fTask + ", dpi=" + fTargetDpi + ") from display 0 -> 16:9 viewport");
                             IBinder b = getBridge();
                             if (b != null) {
                                 Parcel data = Parcel.obtain();
                                 try {
                                     data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
                                     data.writeInt(fStack);
+                                    data.writeInt(fTask);
+                                    data.writeInt(fTargetDpi);
                                     data.writeInt(fLauncherTask);
                                     data.writeInt(fLauncherStack);
                                     b.transact(VdInputBridge.TX_MOVE_STACK, data, null, IBinder.FLAG_ONEWAY);
@@ -843,7 +885,20 @@ public final class AppViewportManager {
                                 listener.onActiveAppChanged(fPkg);
                             }
                         }
-                    });
+                    };
+                    if (lastSurface == null) {
+                        // Launcher is currently hidden/stopped behind PackageInstaller or the escaped
+                        // fullscreen app, so its SurfaceView is destroyed. Move the stack off Display 0
+                        // immediately into a headless VirtualDisplay slot and pull Launcher back to front;
+                        // surfaceCreated() will resize and attach once Launcher resumes!
+                        int vw = lastW > 0 ? lastW : 1248;
+                        activeDpi = fTargetDpi;
+                        activeVdW = VdInputBridge.computeScaledWidth(vw, baseDpi, fTargetDpi);
+                        activeVdH = VdInputBridge.computeScaledHeight(activeVdW);
+                        dispatchMove.run();
+                    } else {
+                        ensureDpiForPackage(fPkg, dispatchMove);
+                    }
                 }
                 return;
             }

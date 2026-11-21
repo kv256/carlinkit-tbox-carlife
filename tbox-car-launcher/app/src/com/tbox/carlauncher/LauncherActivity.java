@@ -678,25 +678,34 @@ public class LauncherActivity extends Activity {
                 @Override
                 public void onClick(View v) {
                     h.dismiss();
-                    boolean ok = viewport != null && viewport.uninstallUserPackage(app.packageName);
-                    if (ok) {
-                        Toast.makeText(LauncherActivity.this, "正在卸载「" + app.label + "」…", Toast.LENGTH_SHORT).show();
-                        handler.postDelayed(new Runnable() {
-                            @Override
-                            public void run() {
-                                if (appDrawerView != null) appDrawerView.reloadApps(prefs);
-                                if (dockView != null) dockView.setDockPackages(prefs.getDockPackages());
-                            }
-                        }, 1800L);
-                    } else {
-                        try {
-                            Intent del = new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + app.packageName));
-                            del.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                            startActivity(del);
-                        } catch (Throwable t) {
-                            Toast.makeText(LauncherActivity.this, "卸载失败：" + t.getMessage(), Toast.LENGTH_SHORT).show();
+                    Toast.makeText(LauncherActivity.this, "正在卸载「" + app.label + "」…", Toast.LENGTH_SHORT).show();
+                    bgExecutor.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            final boolean ok = viewport != null && viewport.uninstallUserPackage(app.packageName);
+                            handler.post(new Runnable() {
+                                @Override
+                                public void run() {
+                                    if (ok) {
+                                        if (app.packageName.equals(prefs.getAutoLaunchPackage())) {
+                                            prefs.setAutoLaunchPackage("");
+                                        }
+                                        if (appDrawerView != null) appDrawerView.reloadApps(prefs);
+                                        if (dockView != null) dockView.setDockPackages(prefs.getDockPackages());
+                                        Toast.makeText(LauncherActivity.this, "已卸载「" + app.label + "」", Toast.LENGTH_SHORT).show();
+                                    } else {
+                                        try {
+                                            Intent del = new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + app.packageName));
+                                            del.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                                            startActivity(del);
+                                        } catch (Throwable t) {
+                                            Toast.makeText(LauncherActivity.this, "卸载失败：" + t.getMessage(), Toast.LENGTH_SHORT).show();
+                                        }
+                                    }
+                                }
+                            });
                         }
-                    }
+                    });
                 }
             }
         ));
@@ -818,7 +827,11 @@ public class LauncherActivity extends Activity {
     protected void onResume() {
         super.onResume();
         applyImmersiveMode();
-        if (dockView != null) dockView.refreshClockAndStatus();
+        if (appDrawerView != null) appDrawerView.reloadApps(prefs);
+        if (dockView != null) {
+            dockView.setDockPackages(prefs.getDockPackages());
+            dockView.refreshClockAndStatus();
+        }
         if (navWidgetView != null) navWidgetView.refreshDate();
         if (viewport != null) {
             viewport.setActive(true);

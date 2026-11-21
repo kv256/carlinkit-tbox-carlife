@@ -17,9 +17,24 @@
 # Only CarLife mode: persistent props are not loaded yet at post-fs-data, so they are read from
 # storage with resetprop -p. USB ADB / CarPlay modes and fastboot are untouched.
 
+MODDIR=${0%/*}
 RP="/data/adb/magisk/magisk resetprop"
-[ "$($RP -p persist.tbox.carlife 2>/dev/null)" = "1" ] || exit 0
-[ "$($RP -p persist.sdcarplay.reverse.disable 2>/dev/null)" = "1" ] && exit 0
+IS_CARLIFE=0
+if [ "$($RP -p persist.tbox.carlife 2>/dev/null)" = "1" ] && [ "$($RP -p persist.sdcarplay.reverse.disable 2>/dev/null)" != "1" ]; then
+    IS_CARLIFE=1
+fi
+
+# In CarLife mode, hide the unused CarPlay OEM middleware (MainAiBox / com.carsyso.main) via
+# Magisk .replace so it doesn't spam CarPlay MFI toasts or poll CarPlay serial ports; restore
+# it automatically whenever the user switches back to CarPlay / USB ADB mode.
+if [ "$IS_CARLIFE" = "1" ]; then
+    mkdir -p "$MODDIR/system/app/MainAiBox" 2>/dev/null
+    : > "$MODDIR/system/app/MainAiBox/.replace"
+else
+    rm -rf "$MODDIR/system/app/MainAiBox" 2>/dev/null
+fi
+
+[ "$IS_CARLIFE" = "1" ] || exit 0
 [ -x /data/adb/carlife/carlife-daemon.sh ] || exit 0
 
 G=/config/usb_gadget/g1

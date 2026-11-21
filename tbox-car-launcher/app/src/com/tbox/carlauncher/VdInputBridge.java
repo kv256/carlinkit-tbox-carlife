@@ -5,6 +5,9 @@ import android.app.IActivityManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentSender;
+import android.content.pm.PackageInstaller;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
@@ -28,6 +31,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.InputStreamReader;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -36,8 +40,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Lightweight system (uid=1000) Binder companion service ("tbox_vd_bridge") for TboxCarLauncher.
@@ -562,25 +568,89 @@ public final class VdInputBridge {
         });
     }
 
-    private static void moveStack(final int stackId, final int launcherTaskId, final int launcherStackId) {
-        final int dispId;
-        synchronized (VdInputBridge.class) {
-            dispId = virtualDisplayId;
+    /**
+     * Ensures a VirtualDisplay slot exists for the requested DPI even if Launcher's SurfaceView
+     * is currently detached (e.g. while Launcher is covered by PackageInstaller or an escaped
+     * fullscreen app on Display 0). When a Surface is attached, delegates to switchToDpi().
+     */
+    private static synchronized int ensureSlotForDpi(int dpi) {
+        if (dpi <= 0) dpi = baseDpi;
+        if (currentSurface != null) {
+            return switchToDpi(dpi);
         }
-        if (iActivityManager == null || stackId < 0 || dispId <= 0) return;
+        int slotW = computeScaledWidth(baseW, baseDpi, dpi);
+        int slotH = computeScaledHeight(slotW);
+        try {
+            DisplaySlot target = displaySlots.get(dpi);
+            if (target == null || target.vd == null) {
+                target = new DisplaySlot(dpi, slotW, slotH);
+                target.vd = displayManager.createVirtualDisplay(
+                    "TboxCarViewport_" + dpi, slotW, slotH, baseDpi, null, VD_FLAGS
+                );
+                if (target.vd != null && target.vd.getDisplay() != null) {
+                    target.displayId = target.vd.getDisplay().getDisplayId();
+                    target.inputForwarder = mCreateInputForwarder.invoke(inputManager, target.displayId);
+                    displaySlots.put(dpi, target);
+                    Log.i(TAG, "Created headless VirtualDisplay id=" + target.displayId
+                        + " size=" + slotW + "x" + slotH + " targetDpi=" + dpi);
+                }
+            }
+            if (target != null && target.displayId > 0) {
+                activeSlot = target;
+                surfaceAttached = false;
+                virtualDisplay = target.vd;
+                virtualDisplayId = target.displayId;
+                inputForwarder = target.inputForwarder;
+                return target.displayId;
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "ensureSlotForDpi(" + dpi + ") failed", t);
+        }
+        return virtualDisplayId;
+    }
+
+    private static void moveStack(final int stackId, final int taskId, final int targetDpi,
+                                  final int launcherTaskId, final int launcherStackId) {
+        if (iActivityManager == null || (stackId < 0 && taskId <= 0)) return;
         cmdExecutor.execute(new Runnable() {
             @Override
             public void run() {
                 try {
-                    Log.i(TAG, "Moving stack=" + stackId + " -> display=" + dispId);
-                    iActivityManager.moveStackToDisplay(stackId, dispId);
+                    int dispId = ensureSlotForDpi(targetDpi > 0 ? targetDpi : baseDpi);
+                    if (dispId <= 0) {
+                        Log.w(TAG, "moveStack aborted: no VirtualDisplay for dpi=" + targetDpi);
+                        return;
+                    }
+                    if (stackId > 0 && stackId != launcherStackId) {
+                        Log.i(TAG, "Moving stack=" + stackId + " -> display=" + dispId + " (dpi=" + targetDpi + ")");
+                        iActivityManager.moveStackToDisplay(stackId, dispId);
+                    } else if (taskId > 0) {
+                        // Never move the stack that contains LauncherActivity; reparent ONLY the escaped task!
+                        Log.i(TAG, "Reparenting task=" + taskId + " (shared stack=" + stackId
+                            + ") -> display=" + dispId + " via startActivityFromRecents");
+                        android.app.ActivityOptions opts = android.app.ActivityOptions.makeBasic();
+                        Method mSetDisp = android.app.ActivityOptions.class.getMethod("setLaunchDisplayId", int.class);
+                        mSetDisp.invoke(opts, dispId);
+                        Method mStartRecents = iActivityManager.getClass().getMethod(
+                            "startActivityFromRecents", int.class, android.os.Bundle.class
+                        );
+                        mStartRecents.invoke(iActivityManager, taskId, opts.toBundle());
+                    }
                     if (launcherTaskId > 0) {
                         iActivityManager.moveTaskToFront(launcherTaskId, 0, null);
                     } else if (launcherStackId >= 0) {
                         iActivityManager.setFocusedStack(launcherStackId);
+                    } else {
+                        Process p = new ProcessBuilder(
+                            "/system/bin/am", "start",
+                            "--display", "0",
+                            "-a", "android.intent.action.MAIN",
+                            "-c", "android.intent.category.HOME"
+                        ).redirectErrorStream(true).start();
+                        p.waitFor();
                     }
                 } catch (Throwable t) {
-                    Log.w(TAG, "moveStack failed stack=" + stackId + " display=" + dispId, t);
+                    Log.w(TAG, "moveStack failed stack=" + stackId + " task=" + taskId + " dpi=" + targetDpi, t);
                 }
             }
         });
@@ -812,23 +882,46 @@ public final class VdInputBridge {
         }
     }
 
-    private static void uninstallPackage(final String pkg) {
+    private static boolean uninstallPackageSync(final String pkg) {
         if (pkg == null || pkg.isEmpty() || "com.tbox.carlauncher".equals(pkg) || pkg.startsWith("com.android.")) {
-            return;
+            return false;
         }
-        cmdExecutor.execute(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    Log.i(TAG, "Uninstalling user package: " + pkg);
-                    Process p = new ProcessBuilder("/system/bin/pm", "uninstall", pkg)
-                        .redirectErrorStream(true).start();
-                    p.waitFor();
-                } catch (Throwable t) {
-                    Log.w(TAG, "pm uninstall failed: " + pkg, t);
+        if (sysCtx == null) return false;
+        try {
+            PackageManager pm = sysCtx.getPackageManager();
+            PackageInstaller installer = pm.getPackageInstaller();
+            final CountDownLatch latch = new CountDownLatch(1);
+            Binder receiverBinder = new Binder() {
+                @Override
+                protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
+                    if (code == IBinder.FIRST_CALL_TRANSACTION) {
+                        latch.countDown();
+                        if (reply != null) reply.writeNoException();
+                        return true;
+                    }
+                    return super.onTransact(code, data, reply, flags);
                 }
+            };
+            Constructor<IntentSender> ctor = IntentSender.class.getDeclaredConstructor(IBinder.class);
+            ctor.setAccessible(true);
+            IntentSender sender = ctor.newInstance(receiverBinder);
+
+            Log.i(TAG, "Uninstalling user package via PackageInstaller: " + pkg);
+            installer.uninstall(pkg, sender);
+            boolean signaled = latch.await(12L, TimeUnit.SECONDS);
+
+            boolean gone = false;
+            try {
+                pm.getPackageInfo(pkg, 0);
+            } catch (PackageManager.NameNotFoundException e) {
+                gone = true;
             }
-        });
+            Log.i(TAG, "Uninstall result for " + pkg + ": signaled=" + signaled + " gone=" + gone);
+            return gone;
+        } catch (Throwable t) {
+            Log.w(TAG, "PackageInstaller.uninstall failed: " + pkg, t);
+            return false;
+        }
     }
 
     private static final class BridgeBinder extends Binder {
@@ -884,14 +977,20 @@ public final class VdInputBridge {
                 } else if (code == TX_MOVE_STACK) {
                     data.enforceInterface(DESCRIPTOR);
                     int stackId = data.readInt();
+                    int taskId = data.readInt();
+                    int targetDpi = data.readInt();
                     int launcherTaskId = data.readInt();
                     int launcherStackId = data.readInt();
-                    moveStack(stackId, launcherTaskId, launcherStackId);
+                    moveStack(stackId, taskId, targetDpi, launcherTaskId, launcherStackId);
                     return true;
                 } else if (code == TX_UNINSTALL) {
                     data.enforceInterface(DESCRIPTOR);
                     final String pkg = data.readString();
-                    uninstallPackage(pkg);
+                    boolean ok = uninstallPackageSync(pkg);
+                    if (reply != null) {
+                        reply.writeNoException();
+                        reply.writeInt(ok ? 1 : 0);
+                    }
                     return true;
                 } else if (code == TX_BT_CMD) {
                     data.enforceInterface(DESCRIPTOR);
