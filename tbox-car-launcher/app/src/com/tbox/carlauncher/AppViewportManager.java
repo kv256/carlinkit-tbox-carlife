@@ -614,6 +614,24 @@ public final class AppViewportManager {
         }
     }
 
+    public void setCarLifeFps(int fps) {
+        IBinder b = getBridge();
+        if (b == null) return;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
+            data.writeInt(fps == 60 ? 60 : 30);
+            b.transact(VdInputBridge.TX_SET_CARLIFE_FPS, data, reply, 0);
+            reply.readException();
+        } catch (Throwable t) {
+            Log.w(TAG, "TX_SET_CARLIFE_FPS failed", t);
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+    }
+
     public float getCpuTempCelsius() {
         IBinder b = getBridge();
         if (b == null) return -1f;

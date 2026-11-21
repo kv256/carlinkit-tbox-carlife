@@ -74,6 +74,7 @@ public final class VdInputBridge {
     public static final int TX_GET_TASK_SNAPSHOT = IBinder.FIRST_CALL_TRANSACTION + 13;
     public static final int TX_REMOVE_TASK = IBinder.FIRST_CALL_TRANSACTION + 14;
     public static final int TX_GET_CPU_TEMP = IBinder.FIRST_CALL_TRANSACTION + 15;
+    public static final int TX_SET_CARLIFE_FPS = IBinder.FIRST_CALL_TRANSACTION + 16;
 
     // BT AT command codes for TX_BT_CMD
     public static final int BT_CMD_PLAY = 1;
@@ -1087,6 +1088,25 @@ public final class VdInputBridge {
                         reply.writeNoException();
                         reply.writeInt(milliC);
                     }
+                    return true;
+                } else if (code == TX_SET_CARLIFE_FPS) {
+                    data.enforceInterface(DESCRIPTOR);
+                    final int fps = data.readInt() == 60 ? 60 : 30;
+                    cmdExecutor.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                Process p = new ProcessBuilder(
+                                    "/system/bin/setprop", "persist.tbox.carlife.fps", String.valueOf(fps)
+                                ).redirectErrorStream(true).start();
+                                p.waitFor();
+                                Log.i(TAG, "Updated persist.tbox.carlife.fps=" + fps);
+                            } catch (Throwable t) {
+                                Log.w(TAG, "setprop persist.tbox.carlife.fps failed", t);
+                            }
+                        }
+                    });
+                    if (reply != null) reply.writeNoException();
                     return true;
                 }
             } finally {

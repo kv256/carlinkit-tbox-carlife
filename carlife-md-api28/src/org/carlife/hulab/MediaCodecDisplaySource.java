@@ -22,7 +22,8 @@ final class MediaCodecDisplaySource implements Runnable {
     static final int COLOR_SURFACE=0x7f000789;
     static final int PROFILE=MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline;
     static final int LEVEL=MediaCodecInfo.CodecProfileLevel.AVCLevel31;
-    static final int BITRATE=3000000, FPS=30, I_INTERVAL=4;
+    static final int BITRATE=3000000, BITRATE_60FPS=5000000, FPS=30, I_INTERVAL=4;
+    static int targetBitrateForFps(int fps){return fps>30?BITRATE_60FPS:BITRATE;}
     static final long REPEAT_US=33333;
     static final String DISPLAY_API="android.hardware.display.DisplayManager.createVirtualDisplay(String,int,int,int,android.view.Surface)";
     static final int DIAGNOSTIC_FIRST_AUS=3;
@@ -65,7 +66,7 @@ final class MediaCodecDisplaySource implements Runnable {
         MediaFormat format(){
             MediaFormat f=MediaFormat.createVideoFormat("video/avc",width,height);
             f.setInteger(MediaFormat.KEY_COLOR_FORMAT,COLOR_SURFACE);
-            f.setInteger(MediaFormat.KEY_BIT_RATE,BITRATE);
+            f.setInteger(MediaFormat.KEY_BIT_RATE,targetBitrateForFps(fps));
             f.setInteger(MediaFormat.KEY_FRAME_RATE,fps);
             if(realtimePriority)f.setInteger(MediaFormat.KEY_PRIORITY,0);
             f.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL,I_INTERVAL);
@@ -116,7 +117,7 @@ final class MediaCodecDisplaySource implements Runnable {
                 if(surface&&profile&&sizeRate&&supported){
                     int wa=(Integer)video.getClass().getMethod("getWidthAlignment").invoke(video),ha=(Integer)video.getClass().getMethod("getHeightAlignment").invoke(video);if(width%wa!=0||height%ha!=0)throw new IOException("requested size violates actual codec alignment");
                     if(MdMain.csdSource.equals("output-format-oem-guard"))verifyOemGuard();
-                    MdMain.logFields("codec_selection","name",info.getName(),"width",width,"height",height,"fps_requested",fps,"max_fps_to_encoder_requested",(float)fps,"profile_requested",PROFILE,"level_requested",mode.codecLevel,"level_idc_requested",mode.levelIdc,"bitrate_requested",BITRATE,"i_frame_interval_s",I_INTERVAL,"source_lab_limit_ms",MdMain.seconds*1000L,"repeat_previous_frame_after_us",MdMain.videoPath.equals("egl")?0:REPEAT_US,"video_path",MdMain.videoPath,"csd_source",MdMain.csdSource,"geometry",selection.geometry.toString(),"width_alignment",wa,"height_alignment",ha,"requested_format",selection.format().toString());
+                    MdMain.logFields("codec_selection","name",info.getName(),"width",width,"height",height,"fps_requested",fps,"max_fps_to_encoder_requested",(float)fps,"profile_requested",PROFILE,"level_requested",mode.codecLevel,"level_idc_requested",mode.levelIdc,"bitrate_requested",targetBitrateForFps(fps),"i_frame_interval_s",I_INTERVAL,"source_lab_limit_ms",MdMain.seconds*1000L,"repeat_previous_frame_after_us",MdMain.videoPath.equals("egl")?0:REPEAT_US,"video_path",MdMain.videoPath,"csd_source",MdMain.csdSource,"geometry",selection.geometry.toString(),"width_alignment",wa,"height_alignment",ha,"requested_format",selection.format().toString());
                     return selection;
                 }
             }
@@ -130,11 +131,11 @@ final class MediaCodecDisplaySource implements Runnable {
         if(!sha.equals("e1b2e80012ade83022614c36faf793d8c094a4421a5bb4818b9429ee1b81c1e6"))throw new IOException("OEM CSD guard is only proven for captured64bit library; runtimeSHA="+sha);
         MdMain.logFields("oem_csd_guard","library",path,"sha256",sha,"policy","original outputFormat CSD retained without byte edits; raw config differs only at proven level_idc store; conflicting inband parameter sets reject");guardVerified=true;
     }
-    MediaCodecDisplaySource(MdMain.Session s,Selection plan,long g){session=s;selection=plan;generation=g;fullVideoTrace=fullVideoTraceDefault;latestFrameRateRequest=new FrameRatePacing.Request(plan.fps);}
+    MediaCodecDisplaySource(MdMain.Session s,Selection plan,long g){session=s;selection=plan;generation=g;appliedBitrate=targetBitrateForFps(plan.fps);fullVideoTrace=fullVideoTraceDefault;latestFrameRateRequest=new FrameRatePacing.Request(plan.fps);}
     void start(){session.reportProgress("source_start",this);thread=new Thread(this,"mediacodec-display-source");thread.start();}
     void requestStop(){stopRequested=true;syncFrameRequested.set(false);pendingBitrate.set(0);pendingFrameRate.set(null);}
     boolean requestKeyFrame(){if(stopRequested||!session.open||generation!=session.videoGeneration)return false;syncFrameRequested.set(true);return true;}
-    boolean requestBitrate(int bps){if(!bitrateControlAvailable||bps<VideoRateControl.FLOOR_BPS||bps>BITRATE||stopRequested||!session.open||generation!=session.videoGeneration)return false;pendingBitrate.set(bps);return true;}
+    boolean requestBitrate(int bps){int maxBps=targetBitrateForFps(selection.fps);if(!bitrateControlAvailable||bps<VideoRateControl.FLOOR_BPS||bps>maxBps||stopRequested||!session.open||generation!=session.videoGeneration)return false;pendingBitrate.set(bps);return true;}
     synchronized boolean requestFrameRate(int fps){if(fps<1||fps>selection.fps||!MdMain.videoPath.equals("egl")||stopRequested||!session.open||generation!=session.videoGeneration)return false;FrameRatePacing.Request request=new FrameRatePacing.Request(fps);latestFrameRateRequest=request;pendingFrameRate.set(request);return true;}
     int currentBitrate(){return appliedBitrate;}
     int appliedFrameRate(){EglDisplayPipe pipe=eglPipe;return pipe==null?0:FrameRatePacing.confirmedFps(latestFrameRateRequest,pipe.appliedRateRequest);}

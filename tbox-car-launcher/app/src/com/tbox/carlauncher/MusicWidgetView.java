@@ -252,6 +252,7 @@ public class MusicWidgetView extends LinearLayout {
             lastTitle = newTitle;
             tvTitle.setText(newTitle);
         }
+        tvTitle.setPlaying(s.playing);
         if (!newArtist.equals(lastArtist)) {
             lastArtist = newArtist;
             tvArtist.setText(newArtist);
@@ -324,37 +325,50 @@ public class MusicWidgetView extends LinearLayout {
     }
 
     /**
-     * Silky sub-pixel 60fps continuous marquee view (Apple CarPlay style):
-     * - Static left-aligned when text fits cleanly.
-     * - Smooth constant-velocity dual-copy loop with soft edge fade when text overflows.
-     * - Immune to sibling layout/progress updates; only resets offset when text actually changes.
+     * Low-overhead marquee view (Apple CarPlay style):
+     * - Static left-aligned when text fits or playback is paused (0% idle CPU/GPU).
+     * - While playing and overflowing, scrolls at ~20fps (50ms) with a single-pass LinearGradient
+     *   text shader (no off-screen saveLayer/DST_OUT allocation) to keep RenderThread & thermal low.
      */
     private static final class SmoothMarqueeView extends View {
         private static final float SPEED_PX_PER_SEC = 40f;
         private static final float LOOP_GAP_PX = 72f;
         private static final float FADE_WIDTH_PX = 24f;
         private static final long INITIAL_HOLD_MS = 1400L;
+        private static final long FRAME_INTERVAL_MS = 50L;
 
+        private final int baseColor;
         private final Paint textPaint = new Paint(
             Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG | Paint.LINEAR_TEXT_FLAG
         );
-        private final Paint fadePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private String text = "";
         private float textWidth = 0f;
         private float offsetPx = 0f;
         private long holdUntilMs = 0L;
         private long lastFrameMs = 0L;
+        private boolean playing = false;
         private boolean scrolling = false;
-        private int lastFadeW = -1;
-        private LinearGradient leftFadeShader;
-        private LinearGradient rightFadeShader;
+        private boolean tickScheduled = false;
+        private int lastShaderW = -1;
+        private LinearGradient rightOnlyShader;
+        private LinearGradient bothEdgesShader;
+
+        private final Runnable tickRunnable = new Runnable() {
+            @Override
+            public void run() {
+                tickScheduled = false;
+                if (scrolling && playing && isAttachedToWindow()) {
+                    invalidate();
+                }
+            }
+        };
 
         SmoothMarqueeView(Context ctx, float textSizePx, int color, Typeface tf) {
             super(ctx);
+            this.baseColor = color;
             textPaint.setColor(color);
             textPaint.setTextSize(textSizePx);
             if (tf != null) textPaint.setTypeface(tf);
-            fadePaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_OUT));
         }
 
         void setText(String newText) {
@@ -366,11 +380,37 @@ public class MusicWidgetView extends LinearLayout {
             invalidate();
         }
 
+        void setPlaying(boolean isPlaying) {
+            if (this.playing == isPlaying) return;
+            this.playing = isPlaying;
+            if (!isPlaying) {
+                stopScrolling();
+                if (offsetPx != 0f) {
+                    offsetPx = 0f;
+                }
+                invalidate();
+            } else {
+                resetScroll();
+                invalidate();
+            }
+        }
+
         void stopScrolling() {
             scrolling = false;
+            if (tickScheduled) {
+                removeCallbacks(tickRunnable);
+                tickScheduled = false;
+            }
+        }
+
+        private void scheduleNextTick(long delayMs) {
+            if (tickScheduled) return;
+            tickScheduled = true;
+            postDelayed(tickRunnable, delayMs);
         }
 
         private void resetScroll() {
+            stopScrolling();
             offsetPx = 0f;
             long now = SystemClock.uptimeMillis();
             holdUntilMs = now + INITIAL_HOLD_MS;
@@ -380,9 +420,14 @@ public class MusicWidgetView extends LinearLayout {
 
         private void updateScrollNeeded() {
             int w = getWidth();
-            scrolling = isAttachedToWindow() && w > 0 && textWidth > w + 1f;
-            if (scrolling) {
-                postInvalidateOnAnimation();
+            boolean need = playing && isAttachedToWindow() && w > 0 && textWidth > w + 1f;
+            scrolling = need;
+            if (need) {
+                long now = SystemClock.uptimeMillis();
+                long wait = holdUntilMs > now ? Math.min(holdUntilMs - now, INITIAL_HOLD_MS) : FRAME_INTERVAL_MS;
+                scheduleNextTick(Math.max(FRAME_INTERVAL_MS, wait));
+            } else {
+                stopScrolling();
             }
         }
 
@@ -398,7 +443,7 @@ public class MusicWidgetView extends LinearLayout {
         protected void onSizeChanged(int w, int h, int oldw, int oldh) {
             super.onSizeChanged(w, h, oldw, oldh);
             if (w != oldw) {
-                lastFadeW = -1;
+                lastShaderW = -1;
                 updateScrollNeeded();
             }
         }
@@ -412,7 +457,26 @@ public class MusicWidgetView extends LinearLayout {
         @Override
         protected void onDetachedFromWindow() {
             super.onDetachedFromWindow();
-            scrolling = false;
+            stopScrolling();
+        }
+
+        private void ensureShaders(int w) {
+            if (lastShaderW == w && rightOnlyShader != null && bothEdgesShader != null) return;
+            lastShaderW = w;
+            int transparent = baseColor & 0x00FFFFFF;
+            float fadeFrac = Math.min(0.25f, FADE_WIDTH_PX / Math.max(1f, (float) w));
+            rightOnlyShader = new LinearGradient(
+                0f, 0f, w, 0f,
+                new int[]{baseColor, baseColor, transparent},
+                new float[]{0f, 1f - fadeFrac, 1f},
+                Shader.TileMode.CLAMP
+            );
+            bothEdgesShader = new LinearGradient(
+                0f, 0f, w, 0f,
+                new int[]{transparent, baseColor, baseColor, transparent},
+                new float[]{0f, fadeFrac, 1f - fadeFrac, 1f},
+                Shader.TileMode.CLAMP
+            );
         }
 
         @Override
@@ -425,8 +489,18 @@ public class MusicWidgetView extends LinearLayout {
             float baseline = (h - (fm.descent + fm.ascent)) * 0.5f;
 
             if (textWidth <= w + 1f) {
-                scrolling = false;
+                stopScrolling();
                 offsetPx = 0f;
+                textPaint.setShader(null);
+                c.drawText(text, 0f, baseline, textPaint);
+                return;
+            }
+
+            ensureShaders(w);
+            if (!playing) {
+                stopScrolling();
+                offsetPx = 0f;
+                textPaint.setShader(rightOnlyShader);
                 c.drawText(text, 0f, baseline, textPaint);
                 return;
             }
@@ -435,7 +509,7 @@ public class MusicWidgetView extends LinearLayout {
             if (lastFrameMs == 0L) lastFrameMs = now;
             if (now >= holdUntilMs) {
                 long dt = now - lastFrameMs;
-                if (dt > 50L) dt = 50L; // clamp frame hiccups so text never jumps
+                if (dt > 120L) dt = 120L;
                 if (dt > 0L) {
                     float cycle = textWidth + LOOP_GAP_PX;
                     offsetPx += (SPEED_PX_PER_SEC * dt) / 1000f;
@@ -446,15 +520,7 @@ public class MusicWidgetView extends LinearLayout {
             }
             lastFrameMs = now;
 
-            if (lastFadeW != w) {
-                lastFadeW = w;
-                leftFadeShader = new LinearGradient(0f, 0f, FADE_WIDTH_PX, 0f,
-                    0xFF000000, 0x00000000, Shader.TileMode.CLAMP);
-                rightFadeShader = new LinearGradient(w - FADE_WIDTH_PX, 0f, w, 0f,
-                    0x00000000, 0xFF000000, Shader.TileMode.CLAMP);
-            }
-
-            int save = c.saveLayer(0f, 0f, w, h, null);
+            textPaint.setShader(offsetPx > 1f ? bothEdgesShader : rightOnlyShader);
             float cycle = textWidth + LOOP_GAP_PX;
             float x1 = -offsetPx;
             c.drawText(text, x1, baseline, textPaint);
@@ -463,17 +529,9 @@ public class MusicWidgetView extends LinearLayout {
                 c.drawText(text, x2, baseline, textPaint);
             }
 
-            // Soft left fade once scrolled past 0, soft right fade always while overflowing
-            if (offsetPx > 1f) {
-                fadePaint.setShader(leftFadeShader);
-                c.drawRect(0f, 0f, FADE_WIDTH_PX, h, fadePaint);
-            }
-            fadePaint.setShader(rightFadeShader);
-            c.drawRect(w - FADE_WIDTH_PX, 0f, w, h, fadePaint);
-            c.restoreToCount(save);
-
-            if (scrolling) {
-                postInvalidateOnAnimation();
+            if (scrolling && playing) {
+                long wait = holdUntilMs > now ? Math.max(FRAME_INTERVAL_MS, holdUntilMs - now) : FRAME_INTERVAL_MS;
+                scheduleNextTick(wait);
             }
         }
     }

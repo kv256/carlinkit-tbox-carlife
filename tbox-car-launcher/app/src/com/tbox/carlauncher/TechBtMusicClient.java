@@ -168,7 +168,7 @@ public final class TechBtMusicClient {
         public void run() {
             if (!started) return;
             pollBridgeBtState();
-            handler.postDelayed(this, 500L);
+            handler.postDelayed(this, 1000L);
         }
     };
 

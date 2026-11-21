@@ -742,6 +742,23 @@ public class LauncherActivity extends Activity {
             }
         ));
 
+        h.body.addView(CockpitDialog.makeSegmentedRow(
+            this, CockpitDialog.ICON_SCALE, 0xFF34D399,
+            "CarLife 投屏帧率",
+            "60fps 更流畅但发热略高 · 下次重连 CarLife 生效",
+            new String[]{"30 fps", "60 fps"},
+            getCarLifeFps() == 60 ? 1 : 0,
+            new CockpitDialog.SegmentCallback() {
+                @Override
+                public void onSegmentSelected(int index) {
+                    int fps = (index == 1) ? 60 : 30;
+                    applyCarLifeFps(fps);
+                    Toast.makeText(LauncherActivity.this,
+                        "已设为 CarLife " + fps + " fps，下次重连或重启生效", Toast.LENGTH_SHORT).show();
+                }
+            }
+        ));
+
         if (!TextUtils.isEmpty(curPkg)) {
             h.body.addView(CockpitDialog.makeActionRow(
                 this, CockpitDialog.ICON_SCALE, UiUtil.ACCENT_BLUE,
@@ -895,6 +912,31 @@ public class LauncherActivity extends Activity {
                 | View.SYSTEM_UI_FLAG_FULLSCREEN
                 | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         );
+    }
+
+    private int getCarLifeFps() {
+        try {
+            String cfg = Settings.Global.getString(getContentResolver(), "carlife_video_config");
+            if (cfg != null && cfg.endsWith(":60")) return 60;
+            if (cfg != null && cfg.endsWith(":30")) return 30;
+        } catch (Throwable ignored) {}
+        try {
+            Class<?> sp = Class.forName("android.os.SystemProperties");
+            String v = (String) sp.getMethod("get", String.class, String.class)
+                .invoke(null, "persist.tbox.carlife.fps", "30");
+            if ("60".equals(v)) return 60;
+        } catch (Throwable ignored) {}
+        return 30;
+    }
+
+    private void applyCarLifeFps(int fps) {
+        int clean = (fps == 60) ? 60 : 30;
+        try {
+            Settings.Global.putString(getContentResolver(), "carlife_video_config", "v1:auto:" + clean);
+        } catch (Throwable ignored) {}
+        if (viewport != null) {
+            viewport.setCarLifeFps(clean);
+        }
     }
 
     private void setGlobalImmersive(boolean enable) {

@@ -214,6 +214,15 @@ start_md() {
     MD_NONCE=$(tr -d '-' < /proc/sys/kernel/random/uuid)
     : > "$LOGS/md.stderr"
     chmod 600 "$LOGS/md.stderr"
+    video_fps=$(getprop persist.tbox.carlife.fps 2>/dev/null)
+    case "$video_fps" in
+        15|30|60)
+            settings put global carlife_video_config "v1:auto:$video_fps" >/dev/null 2>&1 || true
+            ;;
+        *)
+            video_fps=30
+            ;;
+    esac
     CLASSPATH="$JAR" /system/bin/app_process /system/bin org.carlife.hulab.MdMain \
         --transport native-usb \
         --seconds 0 \
@@ -225,7 +234,7 @@ start_md() {
         --encoder OMX.qcom.video.encoder.avc \
         --csd-source buffer \
         --video-mode auto \
-        --video-fps 30 \
+        --video-fps "$video_fps" \
         --audio-source split \
         --native-services on \
         --touch-profile recognized \
@@ -237,7 +246,7 @@ start_md() {
     MD_PID=$!
     MD_READY_LOGGED=0
     MD_CMD_LOGGED=0
-    log "MD_STARTED pid=$MD_PID nonce=$MD_NONCE"
+    log "MD_STARTED pid=$MD_PID fps=$video_fps nonce=$MD_NONCE"
 }
 
 md_flag() {

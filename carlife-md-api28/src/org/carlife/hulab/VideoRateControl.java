@@ -2,7 +2,7 @@ package org.carlife.hulab;
 
 /** Small writer-measured controller; static tiny AUs never estimate USB capacity. */
 final class VideoRateControl {
-    static final int FLOOR_BPS=1000000, CEILING_BPS=4000000;
+    static final int FLOOR_BPS=1000000, CEILING_BPS=6000000;
     private long windowStart=-1,videoBytes,busyNs,lastChange=-1,quietSince=-1,lastPressure;
     private double bytesPerSecond;
     private int requested=CEILING_BPS;
