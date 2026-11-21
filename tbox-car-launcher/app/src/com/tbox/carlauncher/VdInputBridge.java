@@ -587,18 +587,36 @@ public final class VdInputBridge {
     }
 
     private static void moveTaskToStack(final int taskId, final int targetStackId) {
-        if (iActivityManager == null || taskId <= 0 || targetStackId < 0) return;
+        if (iActivityManager == null || taskId <= 0) return;
         cmdExecutor.execute(new Runnable() {
             @Override
             public void run() {
+                if (targetStackId > 0) {
+                    try {
+                        Log.i(TAG, "Promoting task=" + taskId + " -> Display 0 standard stack=" + targetStackId);
+                        Method m = iActivityManager.getClass().getMethod(
+                            "moveTaskToStack", int.class, int.class, boolean.class
+                        );
+                        m.invoke(iActivityManager, taskId, targetStackId, true);
+                        return;
+                    } catch (Throwable t) {
+                        Log.w(TAG, "moveTaskToStack failed task=" + taskId + " stack=" + targetStackId + ", falling back to startActivityFromRecents", t);
+                    }
+                }
+                // On a fresh boot Display 0 only has Stack #0 (ACTIVITY_TYPE_HOME), which rejects
+                // moveTaskToStack for standard tasks. Use startActivityFromRecents with launchDisplayId=0
+                // so AMS creates a standard fullscreen stack on Display 0 and reparents ONLY this task.
                 try {
-                    Log.i(TAG, "Promoting task=" + taskId + " -> Display 0 stack=" + targetStackId);
-                    Method m = iActivityManager.getClass().getMethod(
-                        "moveTaskToStack", int.class, int.class, boolean.class
+                    Log.i(TAG, "Promoting task=" + taskId + " -> Display 0 via startActivityFromRecents(display=0)");
+                    android.app.ActivityOptions opts = android.app.ActivityOptions.makeBasic();
+                    Method mSetDisp = android.app.ActivityOptions.class.getMethod("setLaunchDisplayId", int.class);
+                    mSetDisp.invoke(opts, 0);
+                    Method mStartRecents = iActivityManager.getClass().getMethod(
+                        "startActivityFromRecents", int.class, android.os.Bundle.class
                     );
-                    m.invoke(iActivityManager, taskId, targetStackId, true);
+                    mStartRecents.invoke(iActivityManager, taskId, opts.toBundle());
                 } catch (Throwable t) {
-                    Log.w(TAG, "moveTaskToStack failed task=" + taskId + " stack=" + targetStackId, t);
+                    Log.w(TAG, "startActivityFromRecents(display=0) failed task=" + taskId, t);
                 }
             }
         });

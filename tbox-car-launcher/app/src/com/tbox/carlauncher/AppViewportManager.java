@@ -92,6 +92,7 @@ public final class AppViewportManager {
     private long lastConfineMs = 0L;
     private int lastPromoteTaskId = -1;
     private long lastPromoteMs = 0L;
+    private long lastRecoverMs = 0L;
 
     private Field fStackId, fDisplayId, fTopActivity, fVisible, fTaskIds, fTaskNames;
 
@@ -713,12 +714,16 @@ public final class AppViewportManager {
             if (stacks == null) return;
 
             String topOnVd = null;
+            String fallbackVdPkg = null;
             int escapeStackId = -1;
             String escapePkg = null;
             int promoteTaskId = -1;
             String promotePkg = null;
+            boolean installerActiveOnDisplay0 = false;
             int launcherStackId = -1;
             int launcherTaskId = -1;
+            int display0StandardStackId = -1;
+            String autoPkg = prefs != null ? prefs.getAutoLaunchPackage() : "";
 
             for (Object si : stacks) {
                 if (si == null) continue;
@@ -730,6 +735,10 @@ public final class AppViewportManager {
                 String[] taskNames = fTaskNames != null ? (String[]) fTaskNames.get(si) : null;
                 if (top == null) continue;
                 String pkg = top.getPackageName();
+
+                if (dispId == 0 && stackId > 0 && display0StandardStackId < 0) {
+                    display0StandardStackId = stackId;
+                }
 
                 if (dispId == 0 && "com.tbox.carlauncher".equals(pkg)) {
                     launcherStackId = stackId;
@@ -747,23 +756,25 @@ public final class AppViewportManager {
                     }
                 }
 
+                if (dispId == 0 && visible && isPackageInstallerPkg(pkg)) {
+                    installerActiveOnDisplay0 = true;
+                }
+
                 if (dispId == virtualDisplayId && visible) {
                     if (topOnVd == null) topOnVd = pkg;
                     // PackageInstallerActivity disables its Install button inside onPause() as
                     // anti-tapjacking protection. Because touching Display 0 SurfaceView triggers
                     // TaskTapPointerEventListener -> setFocusedTask(Launcher) -> onPause() BEFORE
-                    // ACTION_UP arrives on the VirtualDisplay, promote standalone PackageInstaller
-                    // tasks to Display 0 where taps go directly to the Install button!
+                    // ACTION_UP arrives on the VirtualDisplay, promote ANY PackageInstaller task
+                    // (standalone or in-task) to Display 0 fullscreen where Install taps work natively!
                     if (promoteTaskId < 0 && isPackageInstallerPkg(pkg)
-                            && taskIds != null && taskIds.length > 0
-                            && taskNames != null && taskNames.length == taskIds.length) {
-                        int lastIdx = taskIds.length - 1;
-                        String baseName = taskNames[lastIdx];
-                        if (baseName != null && (baseName.startsWith("com.android.packageinstaller/")
-                                || baseName.startsWith("com.google.android.packageinstaller/"))) {
-                            promoteTaskId = taskIds[lastIdx];
-                            promotePkg = pkg;
-                        }
+                            && taskIds != null && taskIds.length > 0) {
+                        promoteTaskId = taskIds[taskIds.length - 1];
+                        promotePkg = pkg;
+                    }
+                } else if (dispId > 0 && dispId != virtualDisplayId && visible && !isPackageInstallerPkg(pkg)) {
+                    if (fallbackVdPkg == null || pkg.equals(currentAppPkg) || pkg.equals(autoPkg)) {
+                        fallbackVdPkg = pkg;
                     }
                 } else if (dispId == 0 && visible && !isWhitelistedForDisplay0(top)) {
                     if (escapeStackId < 0) {
@@ -773,20 +784,20 @@ public final class AppViewportManager {
                 }
             }
 
-            if (promoteTaskId > 0 && launcherStackId >= 0) {
+            if (promoteTaskId > 0) {
                 long now = SystemClock.uptimeMillis();
                 if (promoteTaskId != lastPromoteTaskId || now - lastPromoteMs > 400L) {
                     lastPromoteTaskId = promoteTaskId;
                     lastPromoteMs = now;
                     Log.i(TAG, "Promoting " + promotePkg + " (task=" + promoteTaskId
-                        + ") from VirtualDisplay -> Display 0 stack=" + launcherStackId);
+                        + ") from VirtualDisplay -> Display 0 (stdStack=" + display0StandardStackId + ")");
                     IBinder b = getBridge();
                     if (b != null) {
                         Parcel data = Parcel.obtain();
                         try {
                             data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
                             data.writeInt(promoteTaskId);
-                            data.writeInt(launcherStackId);
+                            data.writeInt(display0StandardStackId);
                             b.transact(VdInputBridge.TX_MOVE_TASK_TO_STACK, data, null, IBinder.FLAG_ONEWAY);
                         } catch (Throwable t) {
                             bridgeBinder = null;
@@ -837,6 +848,26 @@ public final class AppViewportManager {
                 return;
             }
 
+            // Never leave the user staring at an empty black VirtualDisplay when another DPI slot
+            // still has a live app running (e.g. after a transient activity closes on a different slot).
+            if (topOnVd == null && fallbackVdPkg != null && !installerActiveOnDisplay0) {
+                long now = SystemClock.uptimeMillis();
+                if (now - lastRecoverMs > 600L) {
+                    lastRecoverMs = now;
+                    final String fRecover = fallbackVdPkg;
+                    Log.i(TAG, "Active VirtualDisplay " + virtualDisplayId
+                        + " is empty; auto-recovering live app " + fRecover + " from peer DPI slot");
+                    ensureDpiForPackage(fRecover, new Runnable() {
+                        @Override
+                        public void run() {
+                            currentAppPkg = fRecover;
+                            if (listener != null) listener.onActiveAppChanged(fRecover);
+                        }
+                    });
+                }
+                return;
+            }
+
             if (topOnVd != null && !topOnVd.equals(currentAppPkg)) {
                 currentAppPkg = topOnVd;
                 if (listener != null) listener.onActiveAppChanged(topOnVd);
@@ -856,8 +887,16 @@ public final class AppViewportManager {
         String pkg = cn.getPackageName();
         if (DISPLAY0_WHITELIST_PKGS.contains(pkg)) return true;
         String cls = cn.getClassName();
-        if ("com.android.settings.FallbackHome".equals(cls)) return true;
-        if ("android".equals(pkg) && cls != null && cls.contains("ResolverActivity")) return true;
+        if (cls != null) {
+            if ("com.android.settings.FallbackHome".equals(cls)) return true;
+            if ("android".equals(pkg) && cls.contains("ResolverActivity")) return true;
+            // Ignore invisible transient background hook activities (e.g. ES File Explorer
+            // RemainTransitionActivity / InstallMonitorActivity) so they never steal the viewport.
+            if ("com.estrongs.android.pop".equals(pkg)
+                    && (cls.contains("RemainTransitionActivity") || cls.contains("InstallMonitorActivity"))) {
+                return true;
+            }
+        }
         return false;
     }
 
