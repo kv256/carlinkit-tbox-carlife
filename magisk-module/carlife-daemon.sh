@@ -508,11 +508,56 @@ start_bt_profile_watch() {
     BTW_PID=$!
 }
 
+# Persist boot-time dwc3 EP0 control trace & kernel USB log at up=~45 s so x7_Log rotation
+# never loses car-boot USB diagnostics; turns ftrace completely off afterward (0% overhead).
+capture_boot_usb_trace() {
+    read _cu _ci < /proc/uptime
+    [ "${_cu%%.*}" -lt 60 ] || return 0
+    (
+        while read _cu _ci < /proc/uptime && [ "${_cu%%.*}" -lt 45 ]; do
+            sleep 1
+        done
+        TR=/sys/kernel/debug/tracing
+        if [ -d "$TR/events/dwc3" ]; then
+            echo 0 > "$TR/tracing_on" 2>/dev/null
+            for n in 3 2 1; do
+                prev=$((n - 1))
+                src="$LOGS/boot_usb_trace.log"
+                [ "$prev" -gt 0 ] && src="$LOGS/boot_usb_trace.$prev.log"
+                [ -f "$src" ] && mv "$src" "$LOGS/boot_usb_trace.$n.log" 2>/dev/null || true
+            done
+            {
+                echo "=== boot_usb_trace saved_at=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null) up=$(uptime_s) udc=$(cat "$UDC_STATE" 2>/dev/null) vid=$(cat "$G/idVendor" 2>/dev/null) pid=$(cat "$G/idProduct" 2>/dev/null) serial=$(cat "$G/strings/0x409/serialnumber" 2>/dev/null) ==="
+                cat "$TR/trace" 2>/dev/null
+            } > "$LOGS/boot_usb_trace.log"
+            chmod 600 "$LOGS/boot_usb_trace.log" 2>/dev/null || true
+            for ev in dwc3/dwc3_ctrl_req dwc3/dwc3_ep0 dwc3/dwc3_gadget \
+                      gadget/usb_gadget_connect gadget/usb_gadget_disconnect gadget/usb_ep_set_halt; do
+                [ -e "$TR/events/$ev/enable" ] && echo 0 > "$TR/events/$ev/enable" 2>/dev/null
+            done
+            echo > "$TR/trace" 2>/dev/null
+        fi
+        for n in 3 2 1; do
+            prev=$((n - 1))
+            src="$LOGS/boot_usb_kmsg.log"
+            [ "$prev" -gt 0 ] && src="$LOGS/boot_usb_kmsg.$prev.log"
+            [ -f "$src" ] && mv "$src" "$LOGS/boot_usb_kmsg.$n.log" 2>/dev/null || true
+        done
+        {
+            echo "=== boot_usb_kmsg saved_at=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null) up=$(uptime_s) ==="
+            dmesg 2>/dev/null | grep -iE 'dwc3|gadget|mtp|accessory|40\.35|c0\.33|40\.34|usb|carlife-aoa' | grep -v 'avc: denied' | head -n 300
+        } > "$LOGS/boot_usb_kmsg.log"
+        chmod 600 "$LOGS/boot_usb_kmsg.log" 2>/dev/null || true
+        log "BOOT_USB_TRACE_SAVED trace_bytes=$(stat -c %s "$LOGS/boot_usb_trace.log" 2>/dev/null || echo 0) kmsg_bytes=$(stat -c %s "$LOGS/boot_usb_kmsg.log" 2>/dev/null || echo 0)"
+    ) &
+}
+
 start_guard
 # Order matters for boot latency: claim USB -> native AOA watcher -> CarLife identity -> MdMain.
 start_observer
 init_usb_hw
 log "=== CARLIFE DAEMON BOOT pid=$$ ==="
+capture_boot_usb_trace
 sync_bt_a2dp_priority_when_booted
 start_bt_profile_watch
 

@@ -62,6 +62,21 @@ LOGF=$RUN/logs/daemon.log
     fi
     log "EARLY_USB_START"
 
+    # Capture boot-time USB EP0 control packets (GET_DESCRIPTOR, MSFT100, AOA 51/52/53,
+    # STALLs, resets) via dwc3 ftrace until carlife-daemon.sh snapshots & disables it at ~45 s.
+    TR=/sys/kernel/debug/tracing
+    [ -d "$TR/events/dwc3" ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
+    if [ -d "$TR/events/dwc3" ]; then
+        echo 0 > "$TR/tracing_on" 2>/dev/null
+        echo > "$TR/trace" 2>/dev/null
+        for ev in dwc3/dwc3_ctrl_req dwc3/dwc3_ep0 dwc3/dwc3_gadget \
+                  gadget/usb_gadget_connect gadget/usb_gadget_disconnect gadget/usb_ep_set_halt; do
+            [ -e "$TR/events/$ev/enable" ] && echo 1 > "$TR/events/$ev/enable" 2>/dev/null
+        done
+        echo 1 > "$TR/tracing_on" 2>/dev/null
+        log "EARLY_USB_FTRACE_ARMED"
+    fi
+
     [ -d /sys/class/gpio/gpio38 ] || echo 38 > /sys/class/gpio/export 2>/dev/null
     echo out > /sys/class/gpio/gpio38/direction 2>/dev/null
     echo 1 > /sys/class/gpio/gpio38/value 2>/dev/null
@@ -136,7 +151,7 @@ LOGF=$RUN/logs/daemon.log
     #   sys.usb.config=carlife, which no trigger matches ("none" would unbind the gadget);
     # - the controller only starts a peripheral session when the port mode is written after
     #   VBUS/charger detection is up (~9-10 s), so re-write it while the port is not attached.
-    rebinds=0 n=0 attached=""
+    rebinds=0 n=0 prev_st=""
     while [ ! -f "$RUN/usb.daemon" ]; do
         read _u _i < /proc/uptime
         [ "${_u%%.*}" -ge 30 ] && break
@@ -155,9 +170,10 @@ LOGF=$RUN/logs/daemon.log
         st=$(cat "/sys/class/udc/$UDC/state" 2>/dev/null)
         if [ "$st" = "not attached" ]; then
             [ $((n % 5)) -eq 0 ] && echo peripheral > /sys/devices/platform/soc/7000000.ssusb/mode 2>/dev/null
-        elif [ -z "$attached" ]; then
-            attached=1
-            log "EARLY_USB_ATTACHED state=$st"
+        fi
+        if [ -n "$st" ] && [ "$st" != "$prev_st" ]; then
+            log "EARLY_USB_STATE prev=${prev_st:-none} now=$st"
+            prev_st="$st"
         fi
         sleep 0.05
     done
