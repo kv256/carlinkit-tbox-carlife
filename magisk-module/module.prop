@@ -1,6 +1,6 @@
 id=tbox_carlife
-name=Tbox CarLife AOA Mode (Android 9)
-version=v1.0
-versionCode=100
-author=local-port
-description=Adds native Baidu CarLife USB AOA projection (1920x720@30 H.264, touch, 48kHz MEDIA, 16kHz TTS, 16kHz HU Mic) alongside stock CarPlay and USB ADB modes.
+name=Carlinkit Tbox CarLife AOA + Cockpit Launcher (Android 9)
+version=v1.1
+versionCode=110
+author=carlinkit-tbox-carlife
+description=Native Baidu CarLife USB AOA projection (1920x720@30/60fps H.264, multi-touch, split 48kHz/16kHz audio, AEC mic) + CarPlay-style 16:9 Cockpit Launcher for CPC200-Tbox (msm8953 / Android 9), coexisting with stock CarPlay & USB ADB.
