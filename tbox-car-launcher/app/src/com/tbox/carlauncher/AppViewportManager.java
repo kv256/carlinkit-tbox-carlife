@@ -466,17 +466,30 @@ public final class AppViewportManager {
         }
     }
 
+    public void focusLauncherHomeStack() {
+        if (iActivityManager == null) return;
+        try {
+            iActivityManager.setFocusedStack(0);
+        } catch (Throwable ignored) {}
+    }
+
     public void syncTouchProxy(boolean force) {
         boolean wantEnabled = active && ready && virtualDisplayId > 0
             && lastSurface != null && !proxyBlockedByUi && !display0Occluded;
         int x = 0, y = 0, w = 0, h = 0;
         if (wantEnabled && surfaceView != null) {
-            int[] loc = new int[2];
-            surfaceView.getLocationInWindow(loc);
-            x = loc[0];
-            y = loc[1];
-            w = surfaceView.getWidth();
-            h = surfaceView.getHeight();
+            // Exclude the entire Display 0 Launcher window (1920x720) from Display 0's
+            // TaskTapPointerEventListener while a 16:9 app is active. Touches on the Left Dock,
+            // Right Cards, and SurfaceView still dispatch normally via InputDispatcher, AND:
+            //   1) Floating IME popups (e.g. WeType PopupWindow extending past x=1384 or dragged
+            //      anywhere on screen) never trigger setFocusedTask(LauncherActivity), which
+            //      previously closed the keyboard and stole focus from the VirtualDisplay EditText!
+            //   2) Tapping Music Card controls never pauses BiliThings / VirtualDisplay apps.
+            View root = surfaceView.getRootView();
+            w = (root != null && root.getWidth() > 0) ? root.getWidth() : surfaceView.getWidth();
+            h = (root != null && root.getHeight() > 0) ? root.getHeight() : surfaceView.getHeight();
+            x = 0;
+            y = 0;
             if (w <= 0 || h <= 0) {
                 wantEnabled = false;
             }

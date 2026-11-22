@@ -488,6 +488,9 @@ public class LauncherActivity extends Activity {
             dockView.setActiveState(viewport != null ? viewport.getCurrentAppPackage() : "", show || recentsVisible);
         }
         updateViewportTouchProxy();
+        if (show && viewport != null) {
+            viewport.focusLauncherHomeStack();
+        }
     }
 
     private void setRecentsVisible(boolean show) {
@@ -504,6 +507,9 @@ public class LauncherActivity extends Activity {
             dockView.setActiveState(viewport != null ? viewport.getCurrentAppPackage() : "", drawerVisible || show);
         }
         updateViewportTouchProxy();
+        if (show && viewport != null) {
+            viewport.focusLauncherHomeStack();
+        }
     }
 
     private void updateViewportTouchProxy() {
