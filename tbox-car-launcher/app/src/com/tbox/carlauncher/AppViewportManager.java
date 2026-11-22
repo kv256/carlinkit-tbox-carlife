@@ -13,6 +13,7 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
+import android.graphics.Region;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -47,6 +48,7 @@ public final class AppViewportManager {
         void onViewportReady(int virtualDisplayId);
         void onActiveAppChanged(String packageName);
         void onAppConfinedFromMainDisplay(String packageName);
+        void onViewportEmpty();
     }
 
     private static final Set<String> DISPLAY0_WHITELIST_PKGS = new HashSet<String>();
@@ -93,6 +95,19 @@ public final class AppViewportManager {
     private int lastPromoteTaskId = -1;
     private long lastPromoteMs = 0L;
     private long lastRecoverMs = 0L;
+    private long lastLaunchMs = 0L;
+
+    private boolean proxyBlockedByUi = true;
+    private boolean display0Occluded = false;
+    private boolean lastProxyEnabled = false;
+    private int lastProxyX = -1;
+    private int lastProxyY = -1;
+    private int lastProxyW = -1;
+    private int lastProxyH = -1;
+    private Method mGetWindowSession;
+    private Method mGetViewRootImpl;
+    private Method mUpdateTapExcludeRegion;
+    private int tapExcludeParamCount = 0;
 
     private Field fStackId, fDisplayId, fTopActivity, fVisible, fTaskIds, fTaskNames;
 
@@ -163,6 +178,23 @@ public final class AppViewportManager {
             fVisible = siCls.getField("visible");
             fTaskIds = siCls.getField("taskIds");
             fTaskNames = siCls.getField("taskNames");
+
+            try {
+                Class<?> wmg = Class.forName("android.view.WindowManagerGlobal");
+                mGetWindowSession = wmg.getMethod("getWindowSession");
+                mGetViewRootImpl = View.class.getMethod("getViewRootImpl");
+                Class<?> iws = Class.forName("android.view.IWindowSession");
+                for (Method m : iws.getDeclaredMethods()) {
+                    if ("updateTapExcludeRegion".equals(m.getName())) {
+                        mUpdateTapExcludeRegion = m;
+                        tapExcludeParamCount = m.getParameterTypes().length;
+                        Log.i(TAG, "Resolved IWindowSession.updateTapExcludeRegion params=" + tapExcludeParamCount);
+                        break;
+                    }
+                }
+            } catch (Throwable wt) {
+                Log.w(TAG, "Failed to resolve IWindowSession.updateTapExcludeRegion", wt);
+            }
         } catch (Throwable t) {
             Log.e(TAG, "Failed to init reflection", t);
         }
@@ -196,6 +228,15 @@ public final class AppViewportManager {
                 if (!ready || virtualDisplayId <= 0) return false;
                 sendMotion(ev);
                 return true;
+            }
+        });
+        surfaceView.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(View v, int l, int t, int r, int b,
+                                       int ol, int ot, int orr, int ob) {
+                if (l != ol || t != ot || r != orr || b != ob) {
+                    syncTouchProxy(false);
+                }
             }
         });
 
@@ -264,6 +305,7 @@ public final class AppViewportManager {
                 lastSurface = null;
                 surfaceBufW = 0;
                 surfaceBufH = 0;
+                syncTouchProxy(true);
                 detachSurfaceFromBridge();
             }
         });
@@ -311,6 +353,7 @@ public final class AppViewportManager {
                 Log.i(TAG, "Bridge VirtualDisplay READY id=" + dispId + " view=" + w + "x" + h
                     + " vd=" + activeVdW + "x" + activeVdH + " dpi=" + initDpi);
                 registerTaskWatcher();
+                syncTouchProxy(true);
                 if (firstReady && listener != null) {
                     mainHandler.post(new Runnable() {
                         @Override
@@ -397,34 +440,103 @@ public final class AppViewportManager {
     public boolean sendBackKey() {
         IBinder b = getBridge();
         if (!isReady() || b == null) return false;
-        sendKey(b, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK);
-        sendKey(b, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK);
-        return true;
-    }
-
-    private void sendKey(IBinder b, int action, int keyCode) {
         Parcel data = Parcel.obtain();
         try {
             data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
-            data.writeInt(action);
-            data.writeInt(keyCode);
-            b.transact(VdInputBridge.TX_KEY, data, null, IBinder.FLAG_ONEWAY);
+            b.transact(VdInputBridge.TX_SEND_BACK, data, null, IBinder.FLAG_ONEWAY);
+            // Re-check stack state after the Back animation settles so an exiting root app
+            // immediately transitions the 16:9 viewport back to another live app or App Drawer.
+            mainHandler.removeCallbacks(checkStacksRunnable);
+            mainHandler.postDelayed(checkStacksRunnable, 380L);
+            return true;
         } catch (Throwable t) {
             bridgeBinder = null;
+            return false;
         } finally {
             data.recycle();
         }
     }
 
+    public void setTouchProxyBlocked(boolean blocked) {
+        if (proxyBlockedByUi != blocked) {
+            proxyBlockedByUi = blocked;
+            syncTouchProxy(false);
+        } else if (!blocked) {
+            syncTouchProxy(false);
+        }
+    }
+
+    public void syncTouchProxy(boolean force) {
+        boolean wantEnabled = active && ready && virtualDisplayId > 0
+            && lastSurface != null && !proxyBlockedByUi && !display0Occluded;
+        int x = 0, y = 0, w = 0, h = 0;
+        if (wantEnabled && surfaceView != null) {
+            int[] loc = new int[2];
+            surfaceView.getLocationInWindow(loc);
+            x = loc[0];
+            y = loc[1];
+            w = surfaceView.getWidth();
+            h = surfaceView.getHeight();
+            if (w <= 0 || h <= 0) {
+                wantEnabled = false;
+            }
+        }
+        if (!force && wantEnabled == lastProxyEnabled
+                && (!wantEnabled || (x == lastProxyX && y == lastProxyY
+                    && w == lastProxyW && h == lastProxyH))) {
+            return;
+        }
+        if (surfaceView == null || mGetWindowSession == null || mGetViewRootImpl == null
+                || mUpdateTapExcludeRegion == null) {
+            return;
+        }
+        try {
+            Object vri = mGetViewRootImpl.invoke(surfaceView);
+            if (vri == null) return;
+            Field fWin = vri.getClass().getDeclaredField("mWindow");
+            fWin.setAccessible(true);
+            Object iWindow = fWin.get(vri);
+            Object session = mGetWindowSession.invoke(null);
+            if (iWindow == null || session == null) return;
+            int regionId = System.identityHashCode(surfaceView);
+            if (tapExcludeParamCount == 6) {
+                if (wantEnabled) {
+                    mUpdateTapExcludeRegion.invoke(session, iWindow, regionId, x, y, w, h);
+                } else {
+                    mUpdateTapExcludeRegion.invoke(session, iWindow, regionId, 0, 0, 0, 0);
+                }
+            } else if (tapExcludeParamCount == 3) {
+                Region r = wantEnabled ? new Region(x, y, x + w, y + h) : null;
+                mUpdateTapExcludeRegion.invoke(session, iWindow, regionId, r);
+            } else if (tapExcludeParamCount == 2) {
+                Region r = wantEnabled ? new Region(x, y, x + w, y + h) : null;
+                mUpdateTapExcludeRegion.invoke(session, iWindow, r);
+            }
+            lastProxyEnabled = wantEnabled;
+            lastProxyX = x;
+            lastProxyY = y;
+            lastProxyW = w;
+            lastProxyH = h;
+            Log.i(TAG, "Updated WindowSession tapExcludeRegion enabled=" + wantEnabled
+                + " rect=(" + x + "," + y + " " + w + "x" + h + ")");
+        } catch (Throwable t) {
+            Log.w(TAG, "updateTapExcludeRegion failed", t);
+            lastProxyEnabled = false;
+        }
+    }
+
     public void setActive(boolean isActive) {
         this.active = isActive;
+        syncTouchProxy(false);
         if (isActive && ready) {
             mainHandler.removeCallbacks(checkStacksRunnable);
             mainHandler.postDelayed(checkStacksRunnable, 150L);
         }
     }
 
-    public void onLocationChanged() {}
+    public void onLocationChanged() {
+        syncTouchProxy(false);
+    }
 
     public boolean isReady() {
         return ready && virtualDisplayId > 0;
@@ -698,6 +810,7 @@ public final class AppViewportManager {
             data.writeInterfaceToken(VdInputBridge.DESCRIPTOR);
             data.writeString(component);
             b.transact(VdInputBridge.TX_LAUNCH, data, null, IBinder.FLAG_ONEWAY);
+            lastLaunchMs = SystemClock.uptimeMillis();
             currentAppPkg = pkg;
             if (listener != null) listener.onActiveAppChanged(pkg);
             mainHandler.removeCallbacks(checkStacksRunnable);
@@ -766,6 +879,7 @@ public final class AppViewportManager {
             int promoteTaskId = -1;
             String promotePkg = null;
             boolean installerActiveOnDisplay0 = false;
+            boolean otherVisibleOnDisplay0 = false;
             int launcherStackId = -1;
             int launcherTaskId = -1;
             int display0StandardStackId = -1;
@@ -809,6 +923,10 @@ public final class AppViewportManager {
                 if (dispId == 0 && visible && isPackageInstallerPkg(pkg)) {
                     installerActiveOnDisplay0 = true;
                 }
+                if (dispId == 0 && visible && !"com.tbox.carlauncher".equals(pkg)
+                        && !isTransientIgnoreActivity(top)) {
+                    otherVisibleOnDisplay0 = true;
+                }
 
                 if (dispId == virtualDisplayId && visible) {
                     if (topOnVd == null) topOnVd = pkg;
@@ -835,6 +953,11 @@ public final class AppViewportManager {
                         }
                     }
                 }
+            }
+
+            if (display0Occluded != otherVisibleOnDisplay0) {
+                display0Occluded = otherVisibleOnDisplay0;
+                syncTouchProxy(false);
             }
 
             if (promoteTaskId > 0) {
@@ -921,22 +1044,38 @@ public final class AppViewportManager {
                 return;
             }
 
-            // Never leave the user staring at an empty black VirtualDisplay when another DPI slot
-            // still has a live app running (e.g. after a transient activity closes on a different slot).
-            if (topOnVd == null && fallbackVdPkg != null && !installerActiveOnDisplay0) {
+            if (topOnVd == null && !installerActiveOnDisplay0 && !otherVisibleOnDisplay0) {
                 long now = SystemClock.uptimeMillis();
-                if (now - lastRecoverMs > 600L) {
-                    lastRecoverMs = now;
-                    final String fRecover = fallbackVdPkg;
-                    Log.i(TAG, "Active VirtualDisplay " + virtualDisplayId
-                        + " is empty; auto-recovering live app " + fRecover + " from peer DPI slot");
-                    ensureDpiForPackage(fRecover, new Runnable() {
-                        @Override
-                        public void run() {
-                            currentAppPkg = fRecover;
-                            if (listener != null) listener.onActiveAppChanged(fRecover);
-                        }
-                    });
+                if (now - lastLaunchMs < 1800L) {
+                    // App is still starting up; re-check shortly rather than prematurely showing Drawer.
+                    mainHandler.removeCallbacks(checkStacksRunnable);
+                    mainHandler.postDelayed(checkStacksRunnable, 500L);
+                    return;
+                }
+                if (fallbackVdPkg != null) {
+                    if (now - lastRecoverMs > 600L) {
+                        lastRecoverMs = now;
+                        final String fRecover = fallbackVdPkg;
+                        Log.i(TAG, "Active VirtualDisplay " + virtualDisplayId
+                            + " is empty; auto-recovering live app " + fRecover + " from peer DPI slot");
+                        ensureDpiForPackage(fRecover, new Runnable() {
+                            @Override
+                            public void run() {
+                                currentAppPkg = fRecover;
+                                if (listener != null) listener.onActiveAppChanged(fRecover);
+                            }
+                        });
+                    }
+                    return;
+                }
+                // All VirtualDisplay slots are now empty (e.g. user pressed Back on the app's root screen).
+                // Never leave the 16:9 viewport blank/black: notify Launcher to show the App Drawer!
+                if (!currentAppPkg.isEmpty()) {
+                    Log.i(TAG, "All VirtualDisplays empty (last=" + currentAppPkg + "); returning to App Drawer");
+                    currentAppPkg = "";
+                }
+                if (listener != null) {
+                    listener.onViewportEmpty();
                 }
                 return;
             }
@@ -955,6 +1094,14 @@ public final class AppViewportManager {
             || "com.google.android.packageinstaller".equals(pkg);
     }
 
+    private static boolean isTransientIgnoreActivity(ComponentName cn) {
+        if (cn == null) return true;
+        String pkg = cn.getPackageName();
+        String cls = cn.getClassName();
+        return "com.estrongs.android.pop".equals(pkg) && cls != null
+            && (cls.contains("RemainTransitionActivity") || cls.contains("InstallMonitorActivity"));
+    }
+
     private static boolean isWhitelistedForDisplay0(ComponentName cn) {
         if (cn == null) return true;
         String pkg = cn.getPackageName();
@@ -963,12 +1110,7 @@ public final class AppViewportManager {
         if (cls != null) {
             if ("com.android.settings.FallbackHome".equals(cls)) return true;
             if ("android".equals(pkg) && cls.contains("ResolverActivity")) return true;
-            // Ignore invisible transient background hook activities (e.g. ES File Explorer
-            // RemainTransitionActivity / InstallMonitorActivity) so they never steal the viewport.
-            if ("com.estrongs.android.pop".equals(pkg)
-                    && (cls.contains("RemainTransitionActivity") || cls.contains("InstallMonitorActivity"))) {
-                return true;
-            }
+            if (isTransientIgnoreActivity(cn)) return true;
         }
         return false;
     }
@@ -980,6 +1122,7 @@ public final class AppViewportManager {
             try { iActivityManager.unregisterTaskStackListener(taskStackListener); } catch (Throwable ignored) {}
             tslRegistered = false;
         }
+        syncTouchProxy(true);
         detachSurfaceFromBridge();
         ready = false;
         virtualDisplayId = -1;

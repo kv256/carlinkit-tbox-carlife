@@ -55,6 +55,7 @@ public class LauncherActivity extends Activity {
 
     private boolean drawerVisible = true;
     private boolean recentsVisible = false;
+    private boolean activityStopped = false;
     private boolean hasLaunchedAnyApp = false;
     private float lastCpuTempC = -1f;
 
@@ -120,6 +121,12 @@ public class LauncherActivity extends Activity {
         applyImmersiveMode();
 
         prefs = new LauncherPrefs(this);
+        CockpitDialog.setVisibilityListener(new CockpitDialog.VisibilityListener() {
+            @Override
+            public void onOpenDialogCountChanged(int openCount) {
+                updateViewportTouchProxy();
+            }
+        });
         buildCockpitUi();
 
         amapBridge = new AMapBridge(this, new AMapBridge.Listener() {
@@ -221,8 +228,11 @@ public class LauncherActivity extends Activity {
             public void onBackClicked() {
                 if (recentsVisible) {
                     setRecentsVisible(false);
+                    if (!hasLaunchedAnyApp) setDrawerVisible(true);
                 } else if (drawerVisible) {
                     if (hasLaunchedAnyApp) setDrawerVisible(false);
+                } else if (!hasLaunchedAnyApp) {
+                    setDrawerVisible(true);
                 } else if (viewport != null) {
                     viewport.sendBackKey();
                 }
@@ -288,6 +298,21 @@ public class LauncherActivity extends Activity {
                     }
                 });
             }
+
+            @Override
+            public void onViewportEmpty() {
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        hasLaunchedAnyApp = false;
+                        if (!drawerVisible && !recentsVisible) {
+                            setDrawerVisible(true);
+                        } else if (dockView != null) {
+                            dockView.setActiveState("", drawerVisible || recentsVisible);
+                        }
+                    }
+                });
+            }
         });
         viewport.attach();
 
@@ -342,12 +367,18 @@ public class LauncherActivity extends Activity {
                         }
                     }
                 });
+                hasLaunchedAnyApp = false;
+                setRecentsVisible(false);
+                setDrawerVisible(true);
                 Toast.makeText(LauncherActivity.this, "已清理全部最近任务", Toast.LENGTH_SHORT).show();
             }
 
             @Override
             public void onCloseRequested() {
                 setRecentsVisible(false);
+                if (!hasLaunchedAnyApp) {
+                    setDrawerVisible(true);
+                }
             }
 
             @Override
@@ -456,6 +487,7 @@ public class LauncherActivity extends Activity {
         if (dockView != null) {
             dockView.setActiveState(viewport != null ? viewport.getCurrentAppPackage() : "", show || recentsVisible);
         }
+        updateViewportTouchProxy();
     }
 
     private void setRecentsVisible(boolean show) {
@@ -470,6 +502,15 @@ public class LauncherActivity extends Activity {
         }
         if (dockView != null) {
             dockView.setActiveState(viewport != null ? viewport.getCurrentAppPackage() : "", drawerVisible || show);
+        }
+        updateViewportTouchProxy();
+    }
+
+    private void updateViewportTouchProxy() {
+        if (viewport != null) {
+            boolean blocked = activityStopped || drawerVisible || recentsVisible
+                || CockpitDialog.getOpenDialogCount() > 0;
+            viewport.setTouchProxyBlocked(blocked);
         }
     }
 
@@ -841,6 +882,13 @@ public class LauncherActivity extends Activity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        activityStopped = false;
+        updateViewportTouchProxy();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         applyImmersiveMode();
@@ -854,6 +902,7 @@ public class LauncherActivity extends Activity {
             viewport.setActive(true);
             viewport.onLocationChanged();
         }
+        updateViewportTouchProxy();
         refreshCpuTempMonitor();
     }
 
@@ -864,8 +913,16 @@ public class LauncherActivity extends Activity {
     }
 
     @Override
+    protected void onStop() {
+        super.onStop();
+        activityStopped = true;
+        updateViewportTouchProxy();
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
+        CockpitDialog.setVisibilityListener(null);
         handler.removeCallbacksAndMessages(null);
         bgExecutor.shutdownNow();
         try { unregisterReceiver(sysReceiver); } catch (Throwable ignored) {}
@@ -889,10 +946,17 @@ public class LauncherActivity extends Activity {
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event != null && (event.getFlags() & KeyEvent.FLAG_VIRTUAL_HARD_KEY) != 0) {
+                // Never re-forward synthetic Back keys injected by VdInputBridge back into VdInputBridge!
+                return true;
+            }
             if (recentsVisible) {
                 setRecentsVisible(false);
+                if (!hasLaunchedAnyApp) setDrawerVisible(true);
             } else if (drawerVisible && hasLaunchedAnyApp) {
                 setDrawerVisible(false);
+            } else if (!drawerVisible && !hasLaunchedAnyApp) {
+                setDrawerVisible(true);
             } else if (!drawerVisible && viewport != null) {
                 viewport.sendBackKey();
             }

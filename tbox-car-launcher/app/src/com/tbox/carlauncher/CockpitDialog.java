@@ -55,16 +55,54 @@ public final class CockpitDialog {
 
     private CockpitDialog() {}
 
+    public interface VisibilityListener {
+        void onOpenDialogCountChanged(int openCount);
+    }
+
+    private static VisibilityListener visibilityListener;
+    private static int openDialogCount = 0;
+
+    public static void setVisibilityListener(VisibilityListener listener) {
+        visibilityListener = listener;
+    }
+
+    public static int getOpenDialogCount() {
+        return openDialogCount;
+    }
+
+    private static void notifyVisibilityChanged() {
+        VisibilityListener l = visibilityListener;
+        if (l != null) {
+            l.onOpenDialogCountChanged(openDialogCount);
+        }
+    }
+
     public static final class Handle {
         public final Dialog dialog;
         public final LinearLayout body;
+        private boolean counted = false;
 
         Handle(Dialog dialog, LinearLayout body) {
             this.dialog = dialog;
             this.body = body;
+            this.dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+                @Override
+                public void onDismiss(android.content.DialogInterface d) {
+                    if (counted) {
+                        counted = false;
+                        openDialogCount = Math.max(0, openDialogCount - 1);
+                        notifyVisibilityChanged();
+                    }
+                }
+            });
         }
 
         public void show() {
+            if (!counted) {
+                counted = true;
+                openDialogCount++;
+                notifyVisibilityChanged();
+            }
             Window w = dialog.getWindow();
             if (w != null) {
                 w.setFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,

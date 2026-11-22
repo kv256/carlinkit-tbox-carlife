@@ -32,6 +32,7 @@ import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.InputStreamReader;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -75,6 +76,7 @@ public final class VdInputBridge {
     public static final int TX_REMOVE_TASK = IBinder.FIRST_CALL_TRANSACTION + 14;
     public static final int TX_GET_CPU_TEMP = IBinder.FIRST_CALL_TRANSACTION + 15;
     public static final int TX_SET_CARLIFE_FPS = IBinder.FIRST_CALL_TRANSACTION + 16;
+    public static final int TX_SEND_BACK = IBinder.FIRST_CALL_TRANSACTION + 17;
 
     // BT AT command codes for TX_BT_CMD
     public static final int BT_CMD_PLAY = 1;
@@ -101,6 +103,10 @@ public final class VdInputBridge {
     private static Method mCreateInputForwarder;
     private static Method mForwardEvent;
     private static IActivityManager iActivityManager;
+    private static Field fStackId;
+    private static Field fDisplayId;
+    private static Field fVisible;
+    private static Field fTopActivity;
 
     private static final class DisplaySlot {
         final int dpi;
@@ -184,6 +190,14 @@ public final class VdInputBridge {
             Method mGetService = ActivityManager.class.getDeclaredMethod("getService");
             mGetService.setAccessible(true);
             iActivityManager = (IActivityManager) mGetService.invoke(null);
+
+            try {
+                Class<?> siCls = Class.forName("android.app.ActivityManager$StackInfo");
+                fStackId = siCls.getField("stackId");
+                fDisplayId = siCls.getField("displayId");
+                fVisible = siCls.getField("visible");
+                fTopActivity = siCls.getField("topActivity");
+            } catch (Throwable ignored) {}
 
             return displayManager != null && inputManager != null && iActivityManager != null;
         } catch (Throwable t) {
@@ -507,6 +521,77 @@ public final class VdInputBridge {
             } catch (Throwable ignored) {}
         }
         surfaceAttached = false;
+    }
+
+    private static int findVisibleStackOnDisplay(int dispId) {
+        if (iActivityManager == null || dispId <= 0 || fStackId == null || fDisplayId == null) {
+            return -1;
+        }
+        try {
+            List<?> stacks = iActivityManager.getAllStackInfos();
+            if (stacks == null) return -1;
+            int fallback = -1;
+            for (Object si : stacks) {
+                if (si == null) continue;
+                int d = fDisplayId.getInt(si);
+                if (d != dispId) continue;
+                int sid = fStackId.getInt(si);
+                if (sid <= 0) continue;
+                boolean vis = fVisible != null && fVisible.getBoolean(si);
+                ComponentName top = fTopActivity != null ? (ComponentName) fTopActivity.get(si) : null;
+                if (vis && top != null) {
+                    return sid;
+                }
+                if (fallback < 0 && top != null) {
+                    fallback = sid;
+                }
+            }
+            return fallback;
+        } catch (Throwable t) {
+            Log.w(TAG, "findVisibleStackOnDisplay(" + dispId + ") failed", t);
+            return -1;
+        }
+    }
+
+    private static void sendBackKeyToActiveVd() {
+        final int dispId;
+        synchronized (VdInputBridge.class) {
+            dispId = virtualDisplayId;
+        }
+        if (dispId <= 0) return;
+        cmdExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    int vdStackId = findVisibleStackOnDisplay(dispId);
+                    if (vdStackId <= 0 || iActivityManager == null) {
+                        // Never inject KEYCODE_BACK when no app is visible on the VirtualDisplay;
+                        // otherwise InputDispatcher delivers it back to LauncherActivity on Display 0!
+                        Log.i(TAG, "No visible app on display=" + dispId + "; skipping KEYCODE_BACK");
+                        return;
+                    }
+                    iActivityManager.setFocusedStack(vdStackId);
+                    // Wait briefly so WindowManagerService & InputDispatcher switch global
+                    // FocusedWindow from Display 0 (Launcher) to the VirtualDisplay app!
+                    try { Thread.sleep(45L); } catch (InterruptedException ignored) {}
+                    if (findVisibleStackOnDisplay(dispId) <= 0) {
+                        return;
+                    }
+                    long downTime = SystemClock.uptimeMillis();
+                    int keyFlags = KeyEvent.FLAG_FROM_SYSTEM | KeyEvent.FLAG_VIRTUAL_HARD_KEY;
+                    KeyEvent down = new KeyEvent(downTime, downTime, KeyEvent.ACTION_DOWN,
+                        KeyEvent.KEYCODE_BACK, 0, 0, -1, 0, keyFlags, InputDevice.SOURCE_KEYBOARD);
+                    forwardEvent(down);
+                    long upTime = SystemClock.uptimeMillis();
+                    KeyEvent up = new KeyEvent(downTime, upTime, KeyEvent.ACTION_UP,
+                        KeyEvent.KEYCODE_BACK, 0, 0, -1, 0, keyFlags, InputDevice.SOURCE_KEYBOARD);
+                    forwardEvent(up);
+                    Log.i(TAG, "Sent KEYCODE_BACK to display=" + dispId + " stack=" + vdStackId);
+                } catch (Throwable t) {
+                    Log.w(TAG, "sendBackKeyToActiveVd failed", t);
+                }
+            }
+        });
     }
 
     private static void forceStopPackage(String pkg) {
@@ -1107,6 +1192,10 @@ public final class VdInputBridge {
                         }
                     });
                     if (reply != null) reply.writeNoException();
+                    return true;
+                } else if (code == TX_SEND_BACK) {
+                    data.enforceInterface(DESCRIPTOR);
+                    sendBackKeyToActiveVd();
                     return true;
                 }
             } finally {
