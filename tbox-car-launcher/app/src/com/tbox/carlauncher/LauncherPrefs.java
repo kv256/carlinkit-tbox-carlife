@@ -3,13 +3,17 @@ package com.tbox.carlauncher;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.os.UserManager;
+import android.util.Log;
 
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 
 public final class LauncherPrefs {
+    private static final String TAG = "TboxLauncherPrefs";
     private static final String PREFS_NAME = "tbox_car_launcher_prefs";
+    private static final String KEY_DE_MIGRATED = "_de_migrated_v1";
     private static final String KEY_DOCK_SLOT_PREFIX = "dock_slot_";
     private static final String KEY_AUTO_LAUNCH_PKG = "auto_launch_pkg";
     private static final String KEY_HIDDEN_PKGS = "hidden_pkgs";
@@ -26,8 +30,26 @@ public final class LauncherPrefs {
     private final SharedPreferences sp;
 
     public LauncherPrefs(Context ctx) {
-        this.ctx = ctx.getApplicationContext();
-        this.sp = this.ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        Context appCtx = ctx.getApplicationContext();
+        this.ctx = appCtx;
+        Context deCtx = appCtx.createDeviceProtectedStorageContext();
+        // LauncherActivity is directBootAware="true"; always store prefs in Device Protected (DE)
+        // storage so Direct Boot never throws IllegalStateException, while migrating legacy CE
+        // prefs once after User 0 unlocks to preserve all user Dock/DPI/auto-launch settings.
+        try {
+            UserManager um = (UserManager) appCtx.getSystemService(Context.USER_SERVICE);
+            if (um != null && um.isUserUnlocked()) {
+                SharedPreferences checkDe = deCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                if (!checkDe.getBoolean(KEY_DE_MIGRATED, false)) {
+                    deCtx.moveSharedPreferencesFrom(appCtx, PREFS_NAME);
+                    deCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .edit().putBoolean(KEY_DE_MIGRATED, true).apply();
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "CE->DE prefs migration skipped", t);
+        }
+        this.sp = deCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
     }
 
     public String[] getDockPackages() {

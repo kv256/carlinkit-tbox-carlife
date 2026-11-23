@@ -18,6 +18,29 @@
 # storage with resetprop -p. USB ADB / CarPlay modes and fastboot are untouched.
 
 MODDIR=${0%/*}
+
+# Defensive guard (all USB modes, RTC-independent): compare SHA-256 of static RRO APKs in this
+# module against /data/resource-cache/.tbox_ovl.sha. If any overlay APK changes while stale
+# overlays.list / @idmap exist, clear them before zygote starts so Android 9 AssetManager never
+# crashes system_server (immune to 1970/2009 RTC clock resets and same-size APK rebuilds).
+_ovl_stamp=/data/resource-cache/.tbox_ovl.sha
+if [ -d "$MODDIR/system/vendor/overlay" ] && [ -d /data/resource-cache ]; then
+    if [ -x /data/adb/magisk/busybox ]; then
+        _ovl_cur=$(/data/adb/magisk/busybox sha256sum "$MODDIR/system/vendor/overlay"/*.apk 2>/dev/null)
+    else
+        _ovl_cur=$(sha256sum "$MODDIR/system/vendor/overlay"/*.apk 2>/dev/null)
+    fi
+    if [ -n "$_ovl_cur" ]; then
+        _ovl_prev=$(cat "$_ovl_stamp" 2>/dev/null)
+        if [ "$_ovl_cur" != "$_ovl_prev" ]; then
+            if [ -f /data/resource-cache/overlays.list ] || [ -f "$_ovl_stamp" ]; then
+                rm -f /data/resource-cache/overlays.list /data/resource-cache/vendor@overlay@*@idmap
+            fi
+            printf '%s\n' "$_ovl_cur" > "$_ovl_stamp" 2>/dev/null
+        fi
+    fi
+fi
+
 RP="/data/adb/magisk/magisk resetprop"
 IS_CARLIFE=0
 if [ "$($RP -p persist.tbox.carlife 2>/dev/null)" = "1" ] && [ "$($RP -p persist.sdcarplay.reverse.disable 2>/dev/null)" != "1" ]; then

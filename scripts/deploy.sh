@@ -76,20 +76,25 @@ if [ "$DO_MODULE" = "1" ]; then
   "$ADB" -s "$SERIAL" push "$REPO/magisk-module/system/etc/bluetooth/interop_database.conf" /data/local/tmp/tbox_interop_database.conf
   "$ADB" -s "$SERIAL" shell "su -c 'set -e
     mkdir -p /data/adb/modules/tbox_carlife/system/bin /data/adb/modules/tbox_carlife/system/vendor/overlay /data/adb/modules/tbox_carlife/system/etc/bluetooth /data/adb/service.d
-    cp /data/local/tmp/tbox_module.prop /data/adb/modules/tbox_carlife/module.prop
-    cp /data/local/tmp/tbox_system.prop /data/adb/modules/tbox_carlife/system.prop
-    cp /data/local/tmp/tbox_post_fs_data.sh /data/adb/modules/tbox_carlife/post-fs-data.sh
-    cp /data/local/tmp/tbox_sd_reverse.sh /data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh
-    cp /data/local/tmp/TboxBtPhoneOverlay.apk /data/adb/modules/tbox_carlife/system/vendor/overlay/TboxBtPhoneOverlay.apk
-    cp /data/local/tmp/tbox_wifi_adb.sh /data/adb/service.d/wifi_adb.sh
-    cp /data/local/tmp/tbox_interop_database.conf /data/adb/modules/tbox_carlife/system/etc/bluetooth/interop_database.conf
-    chmod 0644 /data/adb/modules/tbox_carlife/module.prop /data/adb/modules/tbox_carlife/system.prop /data/adb/modules/tbox_carlife/system/vendor/overlay/TboxBtPhoneOverlay.apk /data/adb/modules/tbox_carlife/system/etc/bluetooth/interop_database.conf
-    chmod 0755 /data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh /data/adb/modules/tbox_carlife/post-fs-data.sh /data/adb/service.d/wifi_adb.sh
-    chown -R root:root /data/adb/modules/tbox_carlife
-    chown root:shell /data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh
-    chown root:root /data/adb/service.d/wifi_adb.sh
-    chcon u:object_r:system_file:s0 /data/adb/modules/tbox_carlife/system/etc/bluetooth/interop_database.conf 2>/dev/null || true
+    install_atomic() {
+      src=\"\$1\"; dst=\"\$2\"; mode=\"\$3\"; owner=\"\$4\"; ctx=\"\$5\"
+      cp \"\$src\" \"\$dst.tmp\"
+      chmod \"\$mode\" \"\$dst.tmp\"
+      chown \"\$owner\" \"\$dst.tmp\"
+      [ -n \"\$ctx\" ] && chcon \"\$ctx\" \"\$dst.tmp\" 2>/dev/null || true
+      mv -f \"\$dst.tmp\" \"\$dst\"
+    }
+    install_atomic /data/local/tmp/tbox_module.prop /data/adb/modules/tbox_carlife/module.prop 0644 root:root \"\"
+    install_atomic /data/local/tmp/tbox_system.prop /data/adb/modules/tbox_carlife/system.prop 0644 root:root \"\"
+    install_atomic /data/local/tmp/tbox_post_fs_data.sh /data/adb/modules/tbox_carlife/post-fs-data.sh 0755 root:root \"\"
+    install_atomic /data/local/tmp/tbox_sd_reverse.sh /data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh 0755 root:shell u:object_r:system_file:s0
+    install_atomic /data/local/tmp/TboxBtPhoneOverlay.apk /data/adb/modules/tbox_carlife/system/vendor/overlay/TboxBtPhoneOverlay.apk 0644 root:root u:object_r:vendor_overlay_file:s0
+    install_atomic /data/local/tmp/tbox_wifi_adb.sh /data/adb/service.d/wifi_adb.sh 0755 root:root \"\"
+    install_atomic /data/local/tmp/tbox_interop_database.conf /data/adb/modules/tbox_carlife/system/etc/bluetooth/interop_database.conf 0644 root:root u:object_r:system_file:s0
+    # Clear Android 9 static RRO idmap cache so updated vendor overlays never mismatch overlays.list CRC
+    rm -f /data/resource-cache/overlays.list /data/resource-cache/vendor@overlay@*@idmap /data/resource-cache/.tbox_ovl.sha
     rm -f /data/local/tmp/tbox_module.prop /data/local/tmp/tbox_system.prop /data/local/tmp/tbox_post_fs_data.sh /data/local/tmp/tbox_sd_reverse.sh /data/local/tmp/tbox_wifi_adb.sh /data/local/tmp/TboxBtPhoneOverlay.apk /data/local/tmp/tbox_interop_database.conf
+    sync
   '"
   echo "NOTE: Magisk module / RRO overlay changes take effect after reboot."
 fi
@@ -98,6 +103,7 @@ if [ "$DO_APP" = "1" ]; then
   APK="$REPO/tbox-usb-switch/build/TboxUsbSwitch.apk"
   [ -f "$APK" ] || bash "$REPO/tbox-usb-switch/build.sh"
   "$ADB" -s "$SERIAL" install -r "$APK"
+  "$ADB" -s "$SERIAL" shell "sync" || true
 fi
 
 if [ "$DO_LAUNCHER" = "1" ]; then
@@ -113,14 +119,26 @@ if [ "$DO_LAUNCHER" = "1" ]; then
   "$ADB" -s "$SERIAL" push "$REPO/magisk-module/system.prop" /data/local/tmp/tbox_system.prop
   "$ADB" -s "$SERIAL" shell "su -c 'set -e
     mkdir -p /data/adb/modules/tbox_carlife/system/priv-app/TboxCarLauncher /data/adb/modules/tbox_carlife/system/etc/permissions /data/adb/modules/tbox_carlife/system/vendor/overlay /data/adb/service.d
-    cp /data/local/tmp/TboxCarLauncher.apk /data/adb/modules/tbox_carlife/system/priv-app/TboxCarLauncher/TboxCarLauncher.apk
-    cp /data/local/tmp/TboxNoNavBarOverlay.apk /data/adb/modules/tbox_carlife/system/vendor/overlay/TboxNoNavBarOverlay.apk
-    cp /data/local/tmp/privapp-permissions-tboxcarlauncher.xml /data/adb/modules/tbox_carlife/system/etc/permissions/privapp-permissions-tboxcarlauncher.xml
-    cp /data/local/tmp/tbox_vd_input.sh /data/adb/service.d/tbox_vd_input.sh
-    cp /data/local/tmp/tbox_system.prop /data/adb/modules/tbox_carlife/system.prop
-    chmod 0755 /data/adb/modules/tbox_carlife/system/priv-app /data/adb/modules/tbox_carlife/system/priv-app/TboxCarLauncher /data/adb/modules/tbox_carlife/system/etc /data/adb/modules/tbox_carlife/system/etc/permissions /data/adb/modules/tbox_carlife/system/vendor /data/adb/modules/tbox_carlife/system/vendor/overlay /data/adb/service.d/tbox_vd_input.sh
-    chmod 0644 /data/adb/modules/tbox_carlife/system/priv-app/TboxCarLauncher/TboxCarLauncher.apk /data/adb/modules/tbox_carlife/system/vendor/overlay/TboxNoNavBarOverlay.apk /data/adb/modules/tbox_carlife/system/etc/permissions/privapp-permissions-tboxcarlauncher.xml /data/adb/modules/tbox_carlife/system.prop
-    chown -R root:root /data/adb/modules/tbox_carlife/system/priv-app /data/adb/modules/tbox_carlife/system/vendor /data/adb/modules/tbox_carlife/system/etc /data/adb/modules/tbox_carlife/system.prop /data/adb/service.d/tbox_vd_input.sh
+    chmod 0755 /data/adb/modules/tbox_carlife/system/priv-app /data/adb/modules/tbox_carlife/system/priv-app/TboxCarLauncher /data/adb/modules/tbox_carlife/system/etc /data/adb/modules/tbox_carlife/system/etc/permissions /data/adb/modules/tbox_carlife/system/vendor /data/adb/modules/tbox_carlife/system/vendor/overlay
+    chown root:root /data/adb/modules/tbox_carlife/system/priv-app /data/adb/modules/tbox_carlife/system/priv-app/TboxCarLauncher /data/adb/modules/tbox_carlife/system/etc /data/adb/modules/tbox_carlife/system/etc/permissions /data/adb/modules/tbox_carlife/system/vendor /data/adb/modules/tbox_carlife/system/vendor/overlay
+    install_atomic() {
+      src=\"\$1\"; dst=\"\$2\"; mode=\"\$3\"; owner=\"\$4\"; ctx=\"\$5\"
+      cp \"\$src\" \"\$dst.tmp\"
+      chmod \"\$mode\" \"\$dst.tmp\"
+      chown \"\$owner\" \"\$dst.tmp\"
+      [ -n \"\$ctx\" ] && chcon \"\$ctx\" \"\$dst.tmp\" 2>/dev/null || true
+      mv -f \"\$dst.tmp\" \"\$dst\"
+    }
+    install_atomic /data/local/tmp/TboxCarLauncher.apk /data/adb/modules/tbox_carlife/system/priv-app/TboxCarLauncher/TboxCarLauncher.apk 0644 root:root u:object_r:system_file:s0
+    install_atomic /data/local/tmp/privapp-permissions-tboxcarlauncher.xml /data/adb/modules/tbox_carlife/system/etc/permissions/privapp-permissions-tboxcarlauncher.xml 0644 root:root u:object_r:system_file:s0
+    install_atomic /data/local/tmp/tbox_vd_input.sh /data/adb/service.d/tbox_vd_input.sh 0755 root:root \"\"
+    install_atomic /data/local/tmp/tbox_system.prop /data/adb/modules/tbox_carlife/system.prop 0644 root:root \"\"
+    OVL_DST=/data/adb/modules/tbox_carlife/system/vendor/overlay/TboxNoNavBarOverlay.apk
+    if ! cmp -s /data/local/tmp/TboxNoNavBarOverlay.apk \"\$OVL_DST\" 2>/dev/null; then
+      install_atomic /data/local/tmp/TboxNoNavBarOverlay.apk \"\$OVL_DST\" 0644 root:root u:object_r:vendor_overlay_file:s0
+    fi
+    # Always clear Android 9 static RRO idmap cache so AssetManager never hits stale @idmap CRC
+    rm -f /data/resource-cache/overlays.list /data/resource-cache/vendor@overlay@*@idmap /data/resource-cache/.tbox_ovl.sha
     setprop persist.suding.hasnavibar false || true
     settings put global force_resizable_activities 1
     settings put global hidden_api_policy_p_apps 1
@@ -138,9 +156,12 @@ if [ "$DO_LAUNCHER" = "1" ]; then
       pm install -r /data/local/tmp/TboxCarLauncher.apk
     fi
     rm -f /data/local/tmp/TboxCarLauncher.apk /data/local/tmp/TboxNoNavBarOverlay.apk /data/local/tmp/privapp-permissions-tboxcarlauncher.xml /data/local/tmp/tbox_vd_input.sh /data/local/tmp/tbox_system.prop
+    sync
   '"
   echo "TboxCarLauncher + TboxNoNavBarOverlay deployed. Reboot once to activate RRO overlay / priv-app mount."
 fi
+
+"$ADB" -s "$SERIAL" shell "sync" >/dev/null 2>&1 || true
 
 # Cleanly terminate current init-managed carlife-daemon + children so init respawns ONE fresh instance
 if [ "$DO_JAR" = "1" ] || [ "$DO_DAEMON" = "1" ]; then

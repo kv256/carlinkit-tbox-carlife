@@ -121,6 +121,13 @@ set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
 set_perm "$MODPATH/system/bin/sd-reverse.sh" 0 2000 0755
 set_perm "$MODPATH/system/etc/bluetooth/interop_database.conf" 0 0 0644 u:object_r:system_file:s0
+set_perm "$MODPATH/system/vendor/overlay/TboxBtPhoneOverlay.apk" 0 0 0644 u:object_r:vendor_overlay_file:s0
+set_perm "$MODPATH/system/vendor/overlay/TboxNoNavBarOverlay.apk" 0 0 0644 u:object_r:vendor_overlay_file:s0
+
+# Clear Android 9 static RRO idmap cache so updated vendor overlays never mismatch overlays.list CRC
+ui_print "- Clearing static RRO resource-cache (overlays.list / @idmap)..."
+rm -f /data/resource-cache/overlays.list /data/resource-cache/vendor@overlay@*@idmap /data/resource-cache/.tbox_ovl.sha
+sync
 
 ui_print "- Done! Reboot the Tbox to activate the CarPlay-style Launcher and CarLife AOA mode."
 ui_print "- After reboot, open 'TboxUsbSwitch' to switch between CarLife / CarPlay / USB ADB."
@@ -173,8 +180,11 @@ cat > "$STAGE/uninstall.sh" <<'EOF'
 #!/system/bin/sh
 rm -f /data/adb/service.d/tbox_vd_input.sh /data/adb/service.d/wifi_adb.sh
 rm -rf /data/adb/carlife
+# Remove static RRO cache entries before module removal so Android 9 never bootloops on missing overlay APK
+rm -f /data/resource-cache/overlays.list /data/resource-cache/vendor@overlay@*@idmap /data/resource-cache/.tbox_ovl.sha
 setprop persist.tbox.carlife 0 >/dev/null 2>&1 || true
 setprop persist.suding.hasnavibar true >/dev/null 2>&1 || true
+sync
 (
   i=0
   while [ "$(getprop sys.boot_completed)" != "1" ] && [ "$i" -lt 90 ]; do

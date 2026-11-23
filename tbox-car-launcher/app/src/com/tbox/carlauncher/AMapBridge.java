@@ -10,9 +10,16 @@ import android.os.Looper;
 import android.text.TextUtils;
 import android.util.Log;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * Standard AMapAuto (com.autonavi.amapauto) Broadcast Protocol bridge.
  * - Listens to AUTONAVI_STANDARD_BROADCAST_SEND for real-time turn-by-turn guide info (KEY_TYPE=10001),
+ *   TMC traffic congestion segments (KEY_TYPE=13011), lane guidance (KEY_TYPE=13012),
  *   state changes (KEY_TYPE=10019), and Home/Company query replies (KEY_TYPE=10046).
  * - Automatically uses AMapAuto's built-in Home/Company (KEY_TYPE=10045 query + KEY_TYPE=10040 navigate),
  *   and prompts the user to configure Home/Company inside AMapAuto if not yet set.
@@ -30,8 +37,40 @@ public final class AMapBridge {
     public static final int KEY_QUERY_HOME_COMPANY = 10045;
     public static final int KEY_RESULT_HOME_COMPANY = 10046;
     public static final int KEY_RESULT_REQUEST = 12005;
+    public static final int KEY_TMC_SEGMENT = 13011;
+    public static final int KEY_DRIVE_WAY = 13012;
 
     private static final long GUIDE_STALE_MS = 20_000L;
+
+    public static final class LaneItem {
+        public final int number;
+        public final int iconCode;
+        public final int extended;
+        public final boolean advised;
+        public final int laneType;
+
+        public LaneItem(int number, int iconCode, int extended, boolean advised, int laneType) {
+            this.number = number;
+            this.iconCode = iconCode;
+            this.extended = extended;
+            this.advised = advised;
+            this.laneType = laneType;
+        }
+    }
+
+    public static final class TmcSegment {
+        public final int number;
+        public final int status; // 10=driven, 0=unknown, 1/5=smooth, 2=slow, 3=jam, 4=severe jam
+        public final int distance;
+        public final int percent;
+
+        public TmcSegment(int number, int status, int distance, int percent) {
+            this.number = number;
+            this.status = status;
+            this.distance = distance;
+            this.percent = percent;
+        }
+    }
 
     public static final class NavState {
         public boolean navigating;
@@ -45,6 +84,17 @@ public final class AMapBridge {
         public String curRoadName = "";
         public int guideType; // 0 = GPS, 1 = Simulation
         public long lastUpdateMs;
+
+        // Lane guidance (KEY_TYPE=13012)
+        public boolean laneEnabled;
+        public final List<LaneItem> lanes = new ArrayList<LaneItem>();
+
+        // TMC congestion segments (KEY_TYPE=13011)
+        public boolean tmcEnabled;
+        public int tmcTotalDis;
+        public int tmcResidualDis;
+        public int tmcFinishDis;
+        public final List<TmcSegment> tmcSegments = new ArrayList<TmcSegment>();
     }
 
     public interface Listener {
@@ -89,6 +139,10 @@ public final class AMapBridge {
             int keyType = intent.getIntExtra("KEY_TYPE", -1);
             if (keyType == KEY_GUIDE_INFO) {
                 handleGuideInfo(intent);
+            } else if (keyType == KEY_DRIVE_WAY) {
+                handleDriveWay(intent);
+            } else if (keyType == KEY_TMC_SEGMENT) {
+                handleTmcSegment(intent);
             } else if (keyType == KEY_APP_STATE) {
                 handleAppState(intent);
             } else if (keyType == KEY_RESULT_HOME_COMPANY) {
@@ -199,6 +253,90 @@ public final class AMapBridge {
         }
     }
 
+    private static int parseIntFlexible(JSONObject obj, String key, int fallback) {
+        if (obj == null || !obj.has(key)) return fallback;
+        Object v = obj.opt(key);
+        if (v instanceof Number) return ((Number) v).intValue();
+        if (v instanceof String) {
+            String s = ((String) v).trim();
+            if (s.isEmpty()) return fallback;
+            try { return Integer.parseInt(s); } catch (Throwable ignored) {}
+        }
+        return fallback;
+    }
+
+    private void handleDriveWay(Intent i) {
+        String raw = i.getStringExtra("EXTRA_DRIVE_WAY");
+        if (TextUtils.isEmpty(raw)) return;
+        try {
+            JSONObject obj = new JSONObject(raw);
+            boolean enabled = obj.optBoolean("drive_way_enabled", false);
+            state.lanes.clear();
+            if (enabled) {
+                JSONArray arr = obj.optJSONArray("drive_way_info");
+                if (arr != null) {
+                    int n = Math.min(arr.length(), 12);
+                    for (int idx = 0; idx < n; idx++) {
+                        JSONObject item = arr.optJSONObject(idx);
+                        if (item == null) continue;
+                        int num = parseIntFlexible(item, "drive_way_number", idx);
+                        int icon = parseIntFlexible(item, "drive_way_lane_Back_icon", -1);
+                        int ext = parseIntFlexible(item, "drive_way_lane_Extended", 0);
+                        boolean advised = item.optBoolean("trafficLaneAdvised", false);
+                        int laneType = parseIntFlexible(item, "trafficLaneType", 0);
+                        if (icon >= 0) {
+                            state.lanes.add(new LaneItem(num, icon, ext, advised, laneType));
+                        }
+                    }
+                }
+            }
+            state.laneEnabled = enabled && !state.lanes.isEmpty();
+            if (state.navigating) {
+                notifyListener();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Failed to parse EXTRA_DRIVE_WAY: " + raw, t);
+        }
+    }
+
+    private void handleTmcSegment(Intent i) {
+        String raw = i.getStringExtra("EXTRA_TMC_SEGMENT");
+        if (TextUtils.isEmpty(raw)) return;
+        try {
+            JSONObject obj = new JSONObject(raw);
+            boolean enabled = obj.optBoolean("tmc_segment_enabled", false);
+            state.tmcSegments.clear();
+            if (enabled) {
+                state.tmcTotalDis = Math.max(0, parseIntFlexible(obj, "total_distance", 0));
+                state.tmcResidualDis = Math.max(0, parseIntFlexible(obj, "residual_distance", 0));
+                state.tmcFinishDis = Math.max(0, parseIntFlexible(obj, "finish_distance", 0));
+                JSONArray arr = obj.optJSONArray("tmc_info");
+                if (arr != null) {
+                    int n = Math.min(arr.length(), 120);
+                    for (int idx = 0; idx < n; idx++) {
+                        JSONObject item = arr.optJSONObject(idx);
+                        if (item == null) continue;
+                        int num = parseIntFlexible(item, "tmc_segment_number", idx + 1);
+                        int status = parseIntFlexible(item, "tmc_status", 0);
+                        int dist = Math.max(0, parseIntFlexible(item, "tmc_segment_distance", 0));
+                        int pct = Math.max(0, parseIntFlexible(item, "tmc_segment_percent", 0));
+                        state.tmcSegments.add(new TmcSegment(num, status, dist, pct));
+                    }
+                }
+            } else {
+                state.tmcTotalDis = 0;
+                state.tmcResidualDis = 0;
+                state.tmcFinishDis = 0;
+            }
+            state.tmcEnabled = enabled && !state.tmcSegments.isEmpty();
+            if (state.navigating) {
+                notifyListener();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Failed to parse EXTRA_TMC_SEGMENT: " + raw, t);
+        }
+    }
+
     public void clearNav() {
         handler.removeCallbacks(staleCheck);
         state.navigating = false;
@@ -209,6 +347,13 @@ public final class AMapBridge {
         state.routeAllDis = 0;
         state.nextRoadName = "";
         state.curRoadName = "";
+        state.laneEnabled = false;
+        state.lanes.clear();
+        state.tmcEnabled = false;
+        state.tmcTotalDis = 0;
+        state.tmcResidualDis = 0;
+        state.tmcFinishDis = 0;
+        state.tmcSegments.clear();
         notifyListener();
     }
 
