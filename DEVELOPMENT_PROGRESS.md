@@ -1,6 +1,6 @@
 # 开发进度跟踪
 
-> 最后更新：2026-11-24 · 分支 `main`（`f8cc04a` + 未提交的 Round 7 修复）
+> 最后更新：2026-11-24 · 分支 `fix/review-round7`（基于 `main` `f8cc04a`，未合并）
 >
 > 本文件只记录**当前状态与待办**：每轮改动后更新「当前迭代」「盒子部署状态」「上车验证清单」，完成的事项移入「历史里程碑」。
 > 根因分析与设计细节写在 [docs/CUSTOMIZATIONS.md](docs/CUSTOMIZATIONS.md)，逐轮交接记录在 [docs/HANDOFF.md](docs/HANDOFF.md)，部署方法见 [docs/DEPLOY.md](docs/DEPLOY.md)。
@@ -31,7 +31,7 @@
 
 ## 2. 当前迭代：Round 7（代码审查修复）
 
-来源：对 `9da347e..f8cc04a`（18 个提交）的代码审查，用户要求修复第 1–6 项；Codex 复审追加 3 项已一并修复。**尚未提交。**
+来源：对 `9da347e..f8cc04a`（18 个提交）的代码审查，用户要求修复第 1–6 项；Codex 复审追加 3 项已一并修复；另修复 CarPlay 模式系统 dock。已提交到 `fix/review-round7`，未合并 `main`。
 
 | # | 问题 | 修复 | 状态 |
 | --- | --- | --- | --- |
@@ -42,6 +42,7 @@
 | 5 | 无歌手曲目进度条反复归零 | 换歌判断改用回退后的歌手名 | 🟡 |
 | 6 | BT 进度条周期性回跳 | 桥接记录位置有效时刻（暂停冻结、继续重锚），Launcher 按该时刻推算 | 🟡 |
 | — | `tbox-car-launcher/build.sh` 不支持标准 SDK 目录 / macOS | 同 `tbox-usb-switch` 的处理 | ✅ |
+| dock | CarPlay（实际所有模式）仍显示原厂左侧 dock | 根因：去导航栏 overlay 改为非 static 后，PackageManager 因 APK mtime 为 1970 一直复用旧解析缓存，overlay 停在 `STATE_NO_IDMAP`。`post-fs-data.sh` 每次开机清除本模块 APK 的解析缓存 | 🏠 CarPlay 模式已验证 |
 
 ---
 
@@ -53,12 +54,12 @@
 | --- | --- |
 | `/data/adb/carlife/carlife-md-api28.jar` | `0243648eb924c5c07e9332647941dcb94d935d9e4b1a13cf9245929b2f147ad1` |
 | `/data/adb/carlife/carlife-daemon.sh` | `2a7b7fe4788a4109ac6f3b3098d6ac41f2163230232610f562ea2b677c97d8b5` |
-| `/data/adb/modules/tbox_carlife/post-fs-data.sh` | `8352db9e275e4dfee7a5b781938c1e75e353e68ee9e1d89fb3810cdaa610c647` |
+| `/data/adb/modules/tbox_carlife/post-fs-data.sh` | `ed82219a145f979e836c3a71474e14d58814c66fea1ded4a56d0c957cd8afbfc` |
 | `/data/adb/service.d/tbox_vd_input.sh` | `d58126732172c6830d68724607dfcc34668b73869845fda3e4033a5af16010bc` |
 | `/data/adb/post-fs-data.d/tbox_rro_guard.sh` | `018b80188fd77f11027116bdc01761fb49656830a0be1fe3274e528bc787d66a` |
 | `…/priv-app/TboxCarLauncher/TboxCarLauncher.apk` | `b3477bbf515e8de34e1ff0bb6ee98adefa335be1582c06b6f88bf91a6a091257` |
 
-运行期属性：`persist.tbox.carlife=1`、`audio.media=usb`、`audio.navi=usb`、`audio.call=bt`、`aec=3`、`aec.dump=1`、`bt.phone=media`、`fps=60`。
+当前模式：**CarPlay**（`persist.tbox.carlife=0`，22:05 重启验证）。CarLife 模式下的属性：`persist.tbox.carlife=1`、`audio.media=usb`、`audio.navi=usb`、`audio.call=bt`、`aec=3`、`aec.dump=1`、`bt.phone=media`、`fps=60`。
 
 > 注意：`audio.call=bt` 时电话不经过盒子（由车机原车蓝牙处理），这与 `bt.phone=media` 的用法一致；如需测 `call=usb` 回声，先在 TboxUsbSwitch 改回 USB。
 
@@ -71,6 +72,7 @@
 - [ ] **BT 进度条（#5 #6）**：播放无歌手曲目不归零；暂停、继续后不回跳。
 - [ ] **仅音乐模式**：放歌 → 暂停 → 再放，一直有声，日志有 `BT_PHONE_MUSIC_UNMUTED`。
 - [ ] **MainAiBox（#1）**：切到 CarPlay 并重启后 `com.carsyso.main` 重新启用；再切回 CarLife 后其设置仍在。
+- [ ] **系统 dock**：CarPlay 与 CarLife 模式下左侧都不再出现原厂 dock，桌面铺满全宽。
 - [ ] **60fps 投屏**：画面流畅、无花屏，`MD_STARTED … fps=60`。
 - [ ] **`call=usb` 通话质量**：双方同时说话不吞字。
 
@@ -112,4 +114,4 @@
 | Round 5 | `261765a` `36a4c6a` `972fd22` `027bfab` | 通话回声消除；TboxUsbSwitch v1.5；QCOM-BTD interop 实验；开机提前出现 CarLife 设备 | 回声未消、开机未拉起 |
 | Round 6 / 6b / 6c | `d699fb5` `f278f4e` `c477f21` `3818ca5` | 远端门控残余回声抑制；开机内核日志 AOA 监听；post-fs-data 早期 USB；手机蓝牙仅音乐；仅音乐静音修复；TboxUsbSwitch v1.6 | 回声 ✅、蓝牙分连 ✅、开机拉起待测 |
 | Launcher | `9da347e` … `f8cc04a` | TboxCarLauncher 驾舱桌面、BT 媒体桥、AMap HUD、60fps 开关、USB 字符串屏蔽 + os_desc、RRO 防开机循环、开源发布准备 | 🟡 |
-| Round 7 | 未提交 | 代码审查修复 #1–#6 + Codex 复审 3 项 | 🏠 / 🟡 |
+| Round 7 | `aa6558a` … | 代码审查修复 #1–#6 + Codex 复审 3 项；系统 dock（PackageManager 解析缓存） | 🏠 / 🟡 |
