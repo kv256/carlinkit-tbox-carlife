@@ -203,6 +203,9 @@ sync
   done
   pm enable com.android.launcher3 >/dev/null 2>&1 || true
   cmd package set-home-activity com.android.launcher3/.Launcher >/dev/null 2>&1 || true
+  # re-enable MainAiBox only if tbox_vd_input.sh disabled it (a user's own disable is kept)
+  [ -f /cache/carlife/.mainaibox_disabled ] && pm enable com.carsyso.main >/dev/null 2>&1 || true
+  rm -f /cache/carlife/.mainaibox_disabled /cache/carlife/.boot_pending /cache/carlife/.boot_failed /cache/carlife/.reenable_tried
 ) &
 EOF
 

@@ -73,6 +73,8 @@ if [ "$DO_MODULE" = "1" ]; then
   "$ADB" -s "$SERIAL" push "$REPO/magisk-module/post-fs-data.d/tbox_rro_guard.sh" /data/local/tmp/tbox_rro_guard.sh
   "$ADB" -s "$SERIAL" push "$REPO/magisk-module/system/bin/sd-reverse.sh" /data/local/tmp/tbox_sd_reverse.sh
   "$ADB" -s "$SERIAL" push "$REPO/magisk-module/service.d/wifi_adb.sh" /data/local/tmp/tbox_wifi_adb.sh
+  # tbox_vd_input.sh also hides MainAiBox in CarLife mode and holds the HOME / re-enable guards
+  "$ADB" -s "$SERIAL" push "$REPO/magisk-module/service.d/tbox_vd_input.sh" /data/local/tmp/tbox_vd_input.sh
   "$ADB" -s "$SERIAL" push "$OVL" /data/local/tmp/TboxBtPhoneOverlay.apk
   "$ADB" -s "$SERIAL" push "$REPO/magisk-module/system/etc/bluetooth/interop_database.conf" /data/local/tmp/tbox_interop_database.conf
   "$ADB" -s "$SERIAL" shell "su -c 'set -e
@@ -92,10 +94,11 @@ if [ "$DO_MODULE" = "1" ]; then
     install_atomic /data/local/tmp/tbox_sd_reverse.sh /data/adb/modules/tbox_carlife/system/bin/sd-reverse.sh 0755 root:shell u:object_r:system_file:s0
     install_atomic /data/local/tmp/TboxBtPhoneOverlay.apk /data/adb/modules/tbox_carlife/system/vendor/overlay/TboxBtPhoneOverlay.apk 0644 root:root u:object_r:vendor_overlay_file:s0
     install_atomic /data/local/tmp/tbox_wifi_adb.sh /data/adb/service.d/wifi_adb.sh 0755 root:root \"\"
+    install_atomic /data/local/tmp/tbox_vd_input.sh /data/adb/service.d/tbox_vd_input.sh 0755 root:root \"\"
     install_atomic /data/local/tmp/tbox_interop_database.conf /data/adb/modules/tbox_carlife/system/etc/bluetooth/interop_database.conf 0644 root:root u:object_r:system_file:s0
     # Clear Android 9 static RRO idmap cache so updated vendor overlays never mismatch overlays.list CRC
     rm -f /data/resource-cache/overlays.list /data/resource-cache/vendor@overlay@*@idmap /data/resource-cache/.tbox_ovl.sha /cache/carlife/.tbox_ovl.sha
-    rm -f /data/local/tmp/tbox_module.prop /data/local/tmp/tbox_system.prop /data/local/tmp/tbox_post_fs_data.sh /data/local/tmp/tbox_rro_guard.sh /data/local/tmp/tbox_sd_reverse.sh /data/local/tmp/tbox_wifi_adb.sh /data/local/tmp/TboxBtPhoneOverlay.apk /data/local/tmp/tbox_interop_database.conf
+    rm -f /data/local/tmp/tbox_module.prop /data/local/tmp/tbox_system.prop /data/local/tmp/tbox_post_fs_data.sh /data/local/tmp/tbox_rro_guard.sh /data/local/tmp/tbox_sd_reverse.sh /data/local/tmp/tbox_wifi_adb.sh /data/local/tmp/tbox_vd_input.sh /data/local/tmp/TboxBtPhoneOverlay.apk /data/local/tmp/tbox_interop_database.conf
     sync
   '"
   echo "NOTE: Magisk module / RRO overlay changes take effect after reboot."

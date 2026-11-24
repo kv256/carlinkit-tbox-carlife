@@ -53,17 +53,11 @@ if [ "$($RP -p persist.tbox.usb.ftrace 2>/dev/null)" = "1" ]; then
     WANT_FTRACE=1
 fi
 
-# In CarLife mode, hide the unused CarPlay OEM middleware (MainAiBox / com.carsyso.main) via
-# Magisk .replace so it doesn't spam CarPlay MFI toasts or poll CarPlay serial ports; restore
-# it automatically whenever the user switches back to CarPlay / USB ADB mode.
-if [ "$IS_CARLIFE" = "1" ]; then
-    if [ ! -f "$MODDIR/system/app/MainAiBox/.replace" ]; then
-        mkdir -p "$MODDIR/system/app/MainAiBox" 2>/dev/null
-        : > "$MODDIR/system/app/MainAiBox/.replace"
-    fi
-else
-    [ -d "$MODDIR/system/app/MainAiBox" ] && rm -rf "$MODDIR/system/app/MainAiBox" 2>/dev/null
-fi
+# MainAiBox (com.carsyso.main) is hidden in CarLife mode with "pm disable-user" by
+# /data/adb/service.d/tbox_vd_input.sh. It used to be hidden here with a Magisk .replace, but a
+# system APK that disappears at boot makes Android 9 wipe the package's data, so every
+# CarLife -> CarPlay switch reset MainAiBox. Remove any .replace left by older versions.
+[ -d "$MODDIR/system/app/MainAiBox" ] && rm -rf "$MODDIR/system/app/MainAiBox" 2>/dev/null
 
 [ "$IS_CARLIFE" = "1" ] || exit 0
 [ -x /data/adb/carlife/carlife-daemon.sh ] || exit 0

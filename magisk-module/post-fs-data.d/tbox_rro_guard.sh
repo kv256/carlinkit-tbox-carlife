@@ -9,6 +9,15 @@ MOD_DIR=/data/adb/modules/tbox_carlife
 # Remove any legacy root-owned stamp inside system-owned /data/resource-cache
 [ -e /data/resource-cache/.tbox_ovl.sha ] && rm -f /data/resource-cache/.tbox_ovl.sha 2>/dev/null
 
+# Boot-completion marker for tbox_vd_input.sh's one-shot re-enable: .boot_pending is cleared at
+# boot_completed, so finding it here means the previous boot never finished (bootloop, or power
+# cut during boot). Only then may a "disable" file be undone; a disable the user sets from the
+# Magisk app happens on a boot that completed and is left alone.
+BOOT_STATE=/cache/carlife
+mkdir -p "$BOOT_STATE" 2>/dev/null
+[ -f "$BOOT_STATE/.boot_pending" ] && : > "$BOOT_STATE/.boot_failed" 2>/dev/null
+: > "$BOOT_STATE/.boot_pending" 2>/dev/null
+
 [ -f "$OVL_LIST" ] || exit 0
 
 MOD_ACTIVE=0
