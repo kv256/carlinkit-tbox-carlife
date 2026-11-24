@@ -5,10 +5,14 @@ final class VideoRateControl {
     static final int FLOOR_BPS=1000000, CEILING_BPS=6000000;
     private long windowStart=-1,videoBytes,busyNs,lastChange=-1,quietSince=-1,lastPressure;
     private double bytesPerSecond;
-    private int requested=CEILING_BPS;
+    private final int ceiling;
+    private int requested;
     private boolean pendingPressure;
-    VideoRateControl(){this(0);}
-    VideoRateControl(long initialPressure){lastPressure=initialPressure;}
+    VideoRateControl(){this(0,CEILING_BPS);}
+    VideoRateControl(long initialPressure){this(initialPressure,CEILING_BPS);}
+    /** ceilingBps must equal the encoder's starting bitrate and the highest value it accepts, so a
+     *  pressure step never lands on a value the source rejects (that would cost a 1 s step for nothing). */
+    VideoRateControl(long initialPressure,int ceilingBps){lastPressure=initialPressure;ceiling=Math.max(FLOOR_BPS,Math.min(CEILING_BPS,ceilingBps));requested=ceiling;}
     synchronized void onWrite(int videoPayloadBytes,long allPacketWriteNs,long now){
         if(videoPayloadBytes<0||allPacketWriteNs<0)throw new IllegalArgumentException("negative writer sample");
         if(windowStart<0)windowStart=now;
@@ -28,9 +32,9 @@ final class VideoRateControl {
         if(pendingPressure){
             pendingPressure=false;
             next=Math.max(FLOOR_BPS,requested*4/5);
-            if(bytesPerSecond>0)next=Math.max(FLOOR_BPS,Math.min(next,(int)Math.min(CEILING_BPS,bytesPerSecond*8*.75)));
+            if(bytesPerSecond>0)next=Math.max(FLOOR_BPS,Math.min(next,(int)Math.min(ceiling,bytesPerSecond*8*.75)));
         }else if(quietSince>=0&&now-quietSince>=5000&&queue.oldestAgeMs<50&&bytesPerSecond>requested/8.0*1.4){
-            next=Math.min(CEILING_BPS,requested+250000);quietSince=now;
+            next=Math.min(ceiling,requested+250000);quietSince=now;
         }
         if(next==requested)return 0;
         requested=next;lastChange=now;return next;

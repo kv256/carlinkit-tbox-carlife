@@ -1074,7 +1074,7 @@ public final class MdMain {
         }
         synchronized void startCapture()throws IOException{
             audioNegotiated=true;maybeStartAudio();
-            final long generation=++videoGeneration;videoRate=new VideoRateControl(nativeVideos.snapshot(SystemClock.uptimeMillis()).pressureEvents);pendingFps=0;
+            final long generation=++videoGeneration;videoRate=new VideoRateControl(nativeVideos.snapshot(SystemClock.uptimeMillis()).pressureEvents,codecSelection==null?VideoRateControl.CEILING_BPS:MediaCodecDisplaySource.targetBitrateForFps(codecSelection.fps));pendingFps=0;
             if(videoSource.equals("mediacodec")){if(codecSelection==null)throw new IOException("MediaCodec plan missing");MediaCodecDisplaySource source=new MediaCodecDisplaySource(this,codecSelection,generation);CAPTURE_LEASE.acquire(source,"mediacodec session="+sessionId+" generation="+generation);mediaSource=source;if(acceptedFps!=codecSelection.fps)source.requestFrameRate(acceptedFps);try{source.start();}catch(RuntimeException e){mediaSource=null;CAPTURE_LEASE.release(source,true);throw new IOException("source thread did not start",e);}return;}
             final Object leaseOwner=new Object();CAPTURE_LEASE.acquire(leaseOwner,"bootstrap session="+sessionId+" generation="+generation);
             final Process child;try{child=new ProcessBuilder("/system/bin/screenrecord","--output-format=h264","--size",width+"x"+height,"--bit-rate","4000000","--time-limit","60","-").start();}catch(IOException e){CAPTURE_LEASE.release(leaseOwner,true);throw e;}capture=child;
