@@ -41,6 +41,7 @@ mkdir -p \
   "$STAGE/system/priv-app/TboxCarLauncher" \
   "$STAGE/carlife" \
   "$STAGE/service.d" \
+  "$STAGE/post-fs-data.d" \
   "$STAGE/apps"
 
 # Standard Magisk module installer shim (official template)
@@ -84,6 +85,7 @@ cp "$JAR" "$STAGE/carlife/carlife-md-api28.jar"
 cp "$REPO/magisk-module/carlife-daemon.sh" "$STAGE/carlife/carlife-daemon.sh"
 cp "$REPO/magisk-module/service.d/wifi_adb.sh" "$STAGE/service.d/wifi_adb.sh"
 cp "$REPO/magisk-module/service.d/tbox_vd_input.sh" "$STAGE/service.d/tbox_vd_input.sh"
+cp "$REPO/magisk-module/post-fs-data.d/tbox_rro_guard.sh" "$STAGE/post-fs-data.d/tbox_rro_guard.sh"
 cp "$SWITCH_APK" "$STAGE/apps/TboxUsbSwitch.apk"
 
 # Magisk customize.sh (runs at module install time)
@@ -111,8 +113,15 @@ cp -f "$MODPATH/service.d/tbox_vd_input.sh" /data/adb/service.d/tbox_vd_input.sh
 chmod 0755 /data/adb/service.d/wifi_adb.sh /data/adb/service.d/tbox_vd_input.sh
 chown root:root /data/adb/service.d/wifi_adb.sh /data/adb/service.d/tbox_vd_input.sh
 
+ui_print "- Deploying global /data/adb/post-fs-data.d/tbox_rro_guard.sh..."
+mkdir -p /data/adb/post-fs-data.d
+cp -f "$MODPATH/post-fs-data.d/tbox_rro_guard.sh" /data/adb/post-fs-data.d/tbox_rro_guard.sh.tmp
+chmod 0755 /data/adb/post-fs-data.d/tbox_rro_guard.sh.tmp
+chown root:root /data/adb/post-fs-data.d/tbox_rro_guard.sh.tmp
+mv -f /data/adb/post-fs-data.d/tbox_rro_guard.sh.tmp /data/adb/post-fs-data.d/tbox_rro_guard.sh
+
 # Clean staging copies already copied to /data/adb/
-rm -rf "$MODPATH/carlife" "$MODPATH/service.d"
+rm -rf "$MODPATH/carlife" "$MODPATH/service.d" "$MODPATH/post-fs-data.d"
 
 # Permissions for Magisk-mounted system files
 set_perm_recursive "$MODPATH" 0 0 0755 0644
@@ -126,7 +135,7 @@ set_perm "$MODPATH/system/vendor/overlay/TboxNoNavBarOverlay.apk" 0 0 0644 u:obj
 
 # Clear Android 9 static RRO idmap cache so updated vendor overlays never mismatch overlays.list CRC
 ui_print "- Clearing static RRO resource-cache (overlays.list / @idmap)..."
-rm -f /data/resource-cache/overlays.list /data/resource-cache/vendor@overlay@*@idmap /data/resource-cache/.tbox_ovl.sha
+rm -f /data/resource-cache/overlays.list /data/resource-cache/vendor@overlay@*@idmap /data/resource-cache/.tbox_ovl.sha /cache/carlife/.tbox_ovl.sha
 sync
 
 ui_print "- Done! Reboot the Tbox to activate the CarPlay-style Launcher and CarLife AOA mode."
@@ -181,7 +190,8 @@ cat > "$STAGE/uninstall.sh" <<'EOF'
 rm -f /data/adb/service.d/tbox_vd_input.sh /data/adb/service.d/wifi_adb.sh
 rm -rf /data/adb/carlife
 # Remove static RRO cache entries before module removal so Android 9 never bootloops on missing overlay APK
-rm -f /data/resource-cache/overlays.list /data/resource-cache/vendor@overlay@*@idmap /data/resource-cache/.tbox_ovl.sha
+rm -f /data/resource-cache/overlays.list /data/resource-cache/vendor@overlay@*@idmap /data/resource-cache/.tbox_ovl.sha /cache/carlife/.tbox_ovl.sha
+rm -f /data/adb/post-fs-data.d/tbox_rro_guard.sh
 setprop persist.tbox.carlife 0 >/dev/null 2>&1 || true
 setprop persist.suding.hasnavibar true >/dev/null 2>&1 || true
 sync
@@ -205,7 +215,8 @@ chmod 0755 \
   "$STAGE/system/bin/sd-reverse.sh" \
   "$STAGE/carlife/carlife-daemon.sh" \
   "$STAGE/service.d/wifi_adb.sh" \
-  "$STAGE/service.d/tbox_vd_input.sh"
+  "$STAGE/service.d/tbox_vd_input.sh" \
+  "$STAGE/post-fs-data.d/tbox_rro_guard.sh"
 
 # Validate shell syntax of all scripts before zipping (sd-reverse.sh uses mksh/bash 'function foo()')
 for s in \
@@ -216,7 +227,8 @@ for s in \
   "$STAGE/uninstall.sh" \
   "$STAGE/carlife/carlife-daemon.sh" \
   "$STAGE/service.d/wifi_adb.sh" \
-  "$STAGE/service.d/tbox_vd_input.sh"; do
+  "$STAGE/service.d/tbox_vd_input.sh" \
+  "$STAGE/post-fs-data.d/tbox_rro_guard.sh"; do
   sh -n "$s"
 done
 bash -n "$STAGE/system/bin/sd-reverse.sh"

@@ -19,11 +19,12 @@
 
 MODDIR=${0%/*}
 
-# Defensive guard (all USB modes, RTC-independent): compare SHA-256 of static RRO APKs in this
-# module against /data/resource-cache/.tbox_ovl.sha. If any overlay APK changes while stale
-# overlays.list / @idmap exist, clear them before zygote starts so Android 9 AssetManager never
-# crashes system_server (immune to 1970/2009 RTC clock resets and same-size APK rebuilds).
-_ovl_stamp=/data/resource-cache/.tbox_ovl.sha
+# Defensive guard (all USB modes, RTC-independent): compare SHA-256 of vendor RRO APKs in this
+# module against /cache/carlife/.tbox_ovl.sha (never writing root-owned files into system-owned
+# /data/resource-cache). If any overlay APK changes while stale overlays.list / @idmap exist,
+# purge them before zygote starts so Android 9 AssetManager never crashes system_server.
+[ -e /data/resource-cache/.tbox_ovl.sha ] && rm -f /data/resource-cache/.tbox_ovl.sha 2>/dev/null
+_ovl_stamp=/cache/carlife/.tbox_ovl.sha
 if [ -d "$MODDIR/system/vendor/overlay" ] && [ -d /data/resource-cache ]; then
     if [ -x /data/adb/magisk/busybox ]; then
         _ovl_cur=$(/data/adb/magisk/busybox sha256sum "$MODDIR/system/vendor/overlay"/*.apk 2>/dev/null)
@@ -36,6 +37,7 @@ if [ -d "$MODDIR/system/vendor/overlay" ] && [ -d /data/resource-cache ]; then
             if [ -f /data/resource-cache/overlays.list ] || [ -f "$_ovl_stamp" ]; then
                 rm -f /data/resource-cache/overlays.list /data/resource-cache/vendor@overlay@*@idmap
             fi
+            mkdir -p /cache/carlife 2>/dev/null
             printf '%s\n' "$_ovl_cur" > "$_ovl_stamp" 2>/dev/null
         fi
     fi
@@ -46,15 +48,21 @@ IS_CARLIFE=0
 if [ "$($RP -p persist.tbox.carlife 2>/dev/null)" = "1" ] && [ "$($RP -p persist.sdcarplay.reverse.disable 2>/dev/null)" != "1" ]; then
     IS_CARLIFE=1
 fi
+WANT_FTRACE=0
+if [ "$($RP -p persist.tbox.usb.ftrace 2>/dev/null)" = "1" ]; then
+    WANT_FTRACE=1
+fi
 
 # In CarLife mode, hide the unused CarPlay OEM middleware (MainAiBox / com.carsyso.main) via
 # Magisk .replace so it doesn't spam CarPlay MFI toasts or poll CarPlay serial ports; restore
 # it automatically whenever the user switches back to CarPlay / USB ADB mode.
 if [ "$IS_CARLIFE" = "1" ]; then
-    mkdir -p "$MODDIR/system/app/MainAiBox" 2>/dev/null
-    : > "$MODDIR/system/app/MainAiBox/.replace"
+    if [ ! -f "$MODDIR/system/app/MainAiBox/.replace" ]; then
+        mkdir -p "$MODDIR/system/app/MainAiBox" 2>/dev/null
+        : > "$MODDIR/system/app/MainAiBox/.replace"
+    fi
 else
-    rm -rf "$MODDIR/system/app/MainAiBox" 2>/dev/null
+    [ -d "$MODDIR/system/app/MainAiBox" ] && rm -rf "$MODDIR/system/app/MainAiBox" 2>/dev/null
 fi
 
 [ "$IS_CARLIFE" = "1" ] || exit 0
@@ -86,18 +94,20 @@ LOGF=$RUN/logs/daemon.log
     log "EARLY_USB_START"
 
     # Capture boot-time USB EP0 control packets (GET_DESCRIPTOR, MSFT100, AOA 51/52/53,
-    # STALLs, resets) via dwc3 ftrace until carlife-daemon.sh snapshots & disables it at ~45 s.
-    TR=/sys/kernel/debug/tracing
-    [ -d "$TR/events/dwc3" ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
-    if [ -d "$TR/events/dwc3" ]; then
-        echo 0 > "$TR/tracing_on" 2>/dev/null
-        echo > "$TR/trace" 2>/dev/null
-        for ev in dwc3/dwc3_ctrl_req dwc3/dwc3_ep0 dwc3/dwc3_gadget \
-                  gadget/usb_gadget_connect gadget/usb_gadget_disconnect gadget/usb_ep_set_halt; do
-            [ -e "$TR/events/$ev/enable" ] && echo 1 > "$TR/events/$ev/enable" 2>/dev/null
-        done
-        echo 1 > "$TR/tracing_on" 2>/dev/null
-        log "EARLY_USB_FTRACE_ARMED"
+    # STALLs, resets) via dwc3 ftrace only when explicitly opted-in via persist.tbox.usb.ftrace=1.
+    if [ "$WANT_FTRACE" = "1" ]; then
+        TR=/sys/kernel/debug/tracing
+        [ -d "$TR/events/dwc3" ] || mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
+        if [ -d "$TR/events/dwc3" ]; then
+            echo 0 > "$TR/tracing_on" 2>/dev/null
+            echo > "$TR/trace" 2>/dev/null
+            for ev in dwc3/dwc3_ctrl_req dwc3/dwc3_ep0 dwc3/dwc3_gadget \
+                      gadget/usb_gadget_connect gadget/usb_gadget_disconnect gadget/usb_ep_set_halt; do
+                [ -e "$TR/events/$ev/enable" ] && echo 1 > "$TR/events/$ev/enable" 2>/dev/null
+            done
+            echo 1 > "$TR/tracing_on" 2>/dev/null
+            log "EARLY_USB_FTRACE_ARMED"
+        fi
     fi
 
     [ -d /sys/class/gpio/gpio38 ] || echo 38 > /sys/class/gpio/export 2>/dev/null
