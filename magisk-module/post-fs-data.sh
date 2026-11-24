@@ -43,6 +43,21 @@ if [ -d "$MODDIR/system/vendor/overlay" ] && [ -d /data/resource-cache ]; then
     fi
 fi
 
+# Drop PackageManager's parse cache for every APK this module mounts, before system_server starts.
+# The cache is reused while the APK's mtime is older than the cache entry, and files deployed
+# before the box's clock is set are stamped 1970: a changed APK then keeps its old parse. That is
+# how TboxNoNavBarOverlay stayed "static" after switching to isStatic=false, got no idmap from
+# either path and left the OEM left dock visible. Re-parsing these few small APKs costs ~ms.
+if [ -d /data/system/package_cache ]; then
+    for _apk in $(find "$MODDIR/system" -name '*.apk' 2>/dev/null); do
+        # keyed by the scanned path's name: the APK itself (vendor/overlay/X.apk) or its package
+        # directory (priv-app/X/X.apk -> "X-<flags>")
+        rm -f /data/system/package_cache/*/"${_apk##*/}"-* 2>/dev/null
+        _pdir=${_apk%/*}; _pdir=${_pdir##*/}
+        case "$_pdir" in overlay|app|priv-app) ;; *) rm -f /data/system/package_cache/*/"$_pdir"-* 2>/dev/null ;; esac
+    done
+fi
+
 RP="/data/adb/magisk/magisk resetprop"
 IS_CARLIFE=0
 if [ "$($RP -p persist.tbox.carlife 2>/dev/null)" = "1" ] && [ "$($RP -p persist.sdcarplay.reverse.disable 2>/dev/null)" != "1" ]; then
