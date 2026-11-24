@@ -297,7 +297,9 @@ public final class MediaHub implements MediaNotificationListener.Callback, TechB
         state.playing = btSnap.playing;
         state.durationMs = Math.max(0L, btSnap.durationMs);
         state.positionMs = Math.max(0L, btSnap.positionMs);
-        state.positionUpdateTimeMs = SystemClock.elapsedRealtime();
+        // anchor at the time the position was valid, not now: a refresh between [MT] updates
+        // would otherwise pin a stale position to the current time and make the bar jump back
+        state.positionUpdateTimeMs = btSnap.positionAtMs > 0L ? btSnap.positionAtMs : SystemClock.elapsedRealtime();
         state.playbackSpeed = 1f;
     }
 

@@ -146,6 +146,9 @@ public final class VdInputBridge {
     private static volatile String btArtist = "";
     private static volatile String btAlbum = "";
     private static volatile long btPosMs = 0L;
+    // SystemClock.elapsedRealtime() at which btPosMs was valid; btPosMs advances from it only
+    // while playing (0 = unknown). Lets the launcher extrapolate without re-anchoring stale values.
+    private static volatile long btPosAtMs = 0L;
     private static volatile long btDurMs = 0L;
 
     public static void main(String[] args) {
@@ -268,6 +271,15 @@ public final class VdInputBridge {
         }
         if (newState != -99) {
             int prev = btA2dpState;
+            long nowEr = SystemClock.elapsedRealtime();
+            if (prev == BT_STATE_PLAYING && newState != BT_STATE_PLAYING && btPosAtMs > 0L) {
+                // freeze the position where playback stopped
+                long pos = btPosMs + Math.max(0L, nowEr - btPosAtMs);
+                btPosMs = btDurMs > 0L ? Math.min(pos, btDurMs) : pos;
+                btPosAtMs = nowEr;
+            } else if (newState == BT_STATE_PLAYING && prev != BT_STATE_PLAYING) {
+                btPosAtMs = nowEr; // the position did not advance while paused
+            }
             btA2dpState = newState;
             btLastEventMs = System.currentTimeMillis();
             if (newState == BT_STATE_DISCONNECTED) {
@@ -275,6 +287,7 @@ public final class VdInputBridge {
                 btArtist = "";
                 btAlbum = "";
                 btPosMs = 0L;
+                btPosAtMs = 0L;
                 btDurMs = 0L;
             }
             if (prev != newState) {
@@ -299,9 +312,12 @@ public final class VdInputBridge {
                         try { dur = Long.parseLong(parts[3].trim()); } catch (Throwable ignored) {}
                     }
                     if (!title.isEmpty()) {
-                        boolean changed = !title.equals(btTitle) || !artist.equals(btArtist);
+                        // compare the artist as stored (falls back to the album when empty), or every
+                        // repeated [MI] of an artist-less track would count as a track change
+                        String effArtist = !artist.isEmpty() ? artist : album;
+                        boolean changed = !title.equals(btTitle) || !effArtist.equals(btArtist);
                         btTitle = title;
-                        btArtist = !artist.isEmpty() ? artist : album;
+                        btArtist = effArtist;
                         btAlbum = album;
                         if (dur > 0) {
                             btDurMs = dur;
@@ -310,6 +326,7 @@ public final class VdInputBridge {
                         }
                         if (changed) {
                             btPosMs = 0L;
+                            btPosAtMs = SystemClock.elapsedRealtime();
                             Log.i(TAG, "BT track changed: title=" + btTitle + " artist=" + btArtist + " dur=" + btDurMs);
                         }
                         btLastEventMs = System.currentTimeMillis();
@@ -331,6 +348,7 @@ public final class VdInputBridge {
                         long dur = Long.parseLong(digits.substring(8, 16));
                         if (btA2dpState > BT_STATE_DISCONNECTED) {
                             btPosMs = Math.max(0L, pos);
+                            btPosAtMs = SystemClock.elapsedRealtime();
                             if (dur > 0L) btDurMs = dur;
                             btLastEventMs = System.currentTimeMillis();
                         }
@@ -1110,6 +1128,7 @@ public final class VdInputBridge {
                         reply.writeString(btAlbum);
                         reply.writeLong(btPosMs);
                         reply.writeLong(btDurMs);
+                        reply.writeLong(btPosAtMs); // appended: older clients stop reading before it
                     }
                     return true;
                 } else if (code == TX_SWITCH_DPI) {

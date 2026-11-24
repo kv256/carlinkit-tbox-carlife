@@ -18,6 +18,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.Parcel;
 import android.os.RemoteException;
+import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.Log;
 
@@ -56,6 +57,8 @@ public final class TechBtMusicClient {
         public String album = "";
         public Bitmap albumArt;
         public long positionMs;
+        /** SystemClock.elapsedRealtime() at which positionMs was valid (0 = unknown). */
+        public long positionAtMs;
         public long durationMs;
         public long lastUpdateMs;
     }
@@ -239,7 +242,8 @@ public final class TechBtMusicClient {
             String album = cleanStr(reply.readString());
             long posMs = reply.readLong();
             long durMs = reply.readLong();
-            applyBridgeBtState(st, title, artist, album, posMs, durMs);
+            long posAtMs = reply.dataAvail() >= 8 ? reply.readLong() : 0L; // absent from an older bridge
+            applyBridgeBtState(st, title, artist, album, posMs, durMs, posAtMs);
         } catch (Throwable ignored) {
             vdBridge = null;
         } finally {
@@ -248,7 +252,7 @@ public final class TechBtMusicClient {
         }
     }
 
-    private void applyBridgeBtState(int st, String bTitle, String bArtist, String bAlbum, long bPosMs, long bDurMs) {
+    private void applyBridgeBtState(int st, String bTitle, String bArtist, String bAlbum, long bPosMs, long bDurMs, long bPosAtMs) {
         int prev = bridgeBtState;
         bridgeBtState = st;
         if (st == VdInputBridge.BT_STATE_DISCONNECTED) {
@@ -282,9 +286,17 @@ public final class TechBtMusicClient {
                 snap.durationMs = bDurMs;
                 changed = true;
             }
-            if (bPosMs >= 0 && (newPlaying || snap.positionMs == 0L || Math.abs(bPosMs - snap.positionMs) > 2500L)) {
+            if (bPosAtMs > 0L && bPosMs >= 0) {
+                // the bridge says when its position was valid: take it as is
+                if (bPosMs != snap.positionMs || bPosAtMs != snap.positionAtMs) {
+                    snap.positionMs = bPosMs;
+                    snap.positionAtMs = bPosAtMs;
+                    changed = true;
+                }
+            } else if (bPosMs >= 0 && (newPlaying || snap.positionMs == 0L || Math.abs(bPosMs - snap.positionMs) > 2500L)) {
                 if (bPosMs != snap.positionMs) {
                     snap.positionMs = bPosMs;
+                    snap.positionAtMs = SystemClock.elapsedRealtime();
                     changed = true;
                 }
             }
@@ -312,6 +324,7 @@ public final class TechBtMusicClient {
         snap.album = "";
         snap.albumArt = null;
         snap.positionMs = 0L;
+        snap.positionAtMs = 0L;
         snap.durationMs = 0L;
         snap.lastUpdateMs = System.currentTimeMillis();
         lastTrackKey = "";
@@ -459,6 +472,8 @@ public final class TechBtMusicClient {
         if (pb != null && pb.getPosition() >= 0) {
             if (snap.playing || trackChanged || snap.positionMs == 0L) {
                 snap.positionMs = pb.getPosition();
+                long at = pb.getLastPositionUpdateTime();
+                snap.positionAtMs = at > 0L ? at : SystemClock.elapsedRealtime();
             }
         }
         snap.lastUpdateMs = System.currentTimeMillis();
