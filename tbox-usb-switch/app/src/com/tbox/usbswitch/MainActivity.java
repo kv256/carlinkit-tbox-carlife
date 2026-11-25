@@ -44,8 +44,14 @@ public class MainActivity extends Activity {
     // Phone <-> box Bluetooth (sdsdk816 "AutoKit-TBox"): calls + music, or music only so the
     // phone's calls stay on the head unit's own Bluetooth. Applied by carlife-daemon.sh.
     private static final String PROP_BT_PHONE = "persist.tbox.carlife.bt.phone";
-    private static final String[] BT_PHONE_VALUES = {"all", "media"};
-    private static final String[] BT_PHONE_LABELS = {"音乐+电话", "仅音乐"};
+    // One "电话" choice drives both properties; only two combinations work:
+    //   HU   = bt.phone media + audio.call bt  (phone calls on the head unit's own Bluetooth)
+    //   BOX  = bt.phone all   + audio.call usb (calls via the box, CarLife USB audio + AEC)
+    // (all + bt: the call reaches the box but its audio goes nowhere; media + usb: no effect.)
+    private static final String PHONE_HU = "hu";
+    private static final String PHONE_BOX = "box";
+    private static final String[] PHONE_VALUES = {PHONE_HU, PHONE_BOX};
+    private static final String[] PHONE_LABELS = {"车机蓝牙", "经盒子 USB"};
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -59,9 +65,9 @@ public class MainActivity extends Activity {
 
     private TextView mediaUsbBtn, mediaBtBtn;
     private TextView naviUsbBtn, naviBtBtn;
-    private TextView callUsbBtn, callBtBtn;
+    private final TextView[] phoneBtns = new TextView[2];
     private final TextView[] aecBtns = new TextView[4];
-    private final TextView[] btPhoneBtns = new TextView[2];
+    private LinearLayout aecRow;
 
     private volatile int currentMode = MODE_CARPLAY;
     private volatile boolean currentWifiAdbOn = false;
@@ -272,18 +278,19 @@ public class MainActivity extends Activity {
         naviUsbBtn = naviBtns[0];
         naviBtBtn = naviBtns[1];
 
-        TextView[] callBtns = new TextView[2];
-        gridLeft.addView(makeAudioRouteRow("电话音频", "蓝牙 = 手机直连车机", PROP_AUDIO_CALL, "电话音频", callBtns));
-        callUsbBtn = callBtns[0];
-        callBtBtn = callBtns[1];
+        View.OnClickListener[] phoneClicks = {
+                v -> setPhoneRoute(PHONE_HU),
+                v -> setPhoneRoute(PHONE_BOX)
+        };
+        gridLeft.addView(makeSettingRow("电话", "接打电话走哪条路，立即重连手机", PHONE_LABELS, phoneClicks, phoneBtns));
 
-        gridRight.addView(makeChoiceRow("手机蓝牙", "手机连盒子的通道，立即重连", PROP_BT_PHONE,
-                BT_PHONE_VALUES, BT_PHONE_LABELS, btPhoneBtns, "（立即重连手机）"));
-        gridRight.addView(makeChoiceRow("通话回声消除", "USB 电话，下一通生效", PROP_AEC,
-                AEC_VALUES, AEC_LABELS, aecBtns, "（下一通电话生效）"));
+        aecRow = makeChoiceRow("通话回声消除", "仅经盒子 USB 通话，下一通生效", PROP_AEC,
+                AEC_VALUES, AEC_LABELS, aecBtns, "（下一通电话生效）");
+        gridRight.addView(aecRow);
 
         TextView tip = new TextView(this);
-        tip.setText("经盒子通话：电话 USB · 手机蓝牙 音乐+电话\n原车蓝牙通话：电话 蓝牙 · 手机蓝牙 仅音乐（车机只连电话）");
+        tip.setText("电话 · 车机蓝牙（推荐）：手机只把音乐连盒子，电话由车机原车蓝牙接打；请在车机蓝牙里让手机只连电话\n"
+                + "电话 · 经盒子 USB：手机音乐+电话都连盒子，通话声音经 CarLife 送车机，带回声消除");
         tip.setTextColor(Color.parseColor("#94A3B8"));
         tip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         tip.setLineSpacing(dp(2), 1.0f);
@@ -444,9 +451,27 @@ public class MainActivity extends Activity {
         styleChoice(AEC_VALUES, aecBtns, v, "2");
     }
 
-    private void styleBtPhone(String value) {
-        String v = value == null ? "" : value.trim().toLowerCase(Locale.US);
-        styleChoice(BT_PHONE_VALUES, btPhoneBtns, v, "all");
+    /** bt.phone decides where calls actually go, so it defines the current choice. */
+    private static String phoneRouteOf(String btPhone) {
+        return "media".equalsIgnoreCase(btPhone == null ? "" : btPhone.trim()) ? PHONE_HU : PHONE_BOX;
+    }
+
+    private void stylePhone(String route) {
+        styleChoice(PHONE_VALUES, phoneBtns, route, PHONE_BOX);
+        if (aecRow != null) {
+            boolean box = PHONE_BOX.equals(route);
+            aecRow.setAlpha(box ? 1f : 0.4f);
+            for (TextView b : aecBtns) if (b != null) b.setEnabled(box);
+        }
+    }
+
+    private void setPhoneRoute(String route) {
+        if (!ensureRootOrPrompt()) return;
+        boolean hu = PHONE_HU.equals(route);
+        runRootCommand("setprop " + PROP_BT_PHONE + " " + (hu ? "media" : "all")
+                        + "; setprop " + PROP_AUDIO_CALL + " " + (hu ? "bt" : "usb"),
+                hu ? "电话 → 车机蓝牙（立即重连手机：盒子只连音乐）"
+                   : "电话 → 经盒子 USB（立即重连手机：音乐+电话）");
     }
 
     private void styleChoice(String[] values, TextView[] btns, String v, String def) {
@@ -640,6 +665,20 @@ public class MainActivity extends Activity {
                 }
             }
 
+            // Repair a combination that cannot work (left over from v1.6's two separate settings):
+            // keep where calls really go (bt.phone) and align audio.call with it.
+            String phoneRoute = phoneRouteOf(pBtPhone);
+            String wantCall = PHONE_HU.equals(phoneRoute) ? "bt" : "usb";
+            boolean callFixed = false;
+            if (rootOk && !wantCall.equalsIgnoreCase(pCall.isEmpty() ? "usb" : pCall)) {
+                ExecResult fix = execCmd(new String[]{"su", "-c", "setprop " + PROP_AUDIO_CALL + " " + wantCall});
+                if (fix.rc == 0) {
+                    pCall = wantCall;
+                    callFixed = true;
+                }
+            }
+            final boolean finalCallFixed = callFixed;
+
             int mode;
             if ("1".equals(revDisable)) {
                 mode = MODE_USB_ADB;
@@ -679,9 +718,8 @@ public class MainActivity extends Activity {
 
                 styleTogglePair(mediaUsbBtn, mediaBtBtn, mUsb);
                 styleTogglePair(naviUsbBtn, naviBtBtn, nUsb);
-                styleTogglePair(callUsbBtn, callBtBtn, cUsb);
                 styleAec(pAec);
-                styleBtPhone(pBtPhone);
+                stylePhone(phoneRoute);
 
                 String ipText = ip.isEmpty() ? "未连接 Wi-Fi" : ip;
                 String wifiAdbText = wifiOn
@@ -697,8 +735,8 @@ public class MainActivity extends Activity {
                 }
                 sb.append("音频：媒体 ").append(mUsb ? "USB" : "蓝牙")
                   .append(" · 导航 ").append(nUsb ? "USB" : "蓝牙")
-                  .append(" · 电话 ").append(cUsb ? "USB" : "蓝牙")
-                  .append(" · 手机蓝牙 ").append("media".equals(pBtPhone.trim()) ? "仅音乐" : "音乐+电话").append('\n');
+                  .append(" · 电话 ").append(PHONE_HU.equals(phoneRoute) ? "车机蓝牙" : "经盒子 USB")
+                  .append(finalCallFixed ? "（已自动修正）" : "").append('\n');
                 sb.append("USB 状态：").append(usbSummary).append('\n');
                 sb.append("Wi-Fi IP：").append(ipText).append('\n');
                 sb.append("Wi-Fi ADB：").append(wifiAdbText);
@@ -758,7 +796,7 @@ public class MainActivity extends Activity {
             cmd = "setprop persist.sdcarplay.reverse.disable 0; setprop persist.tbox.carlife 0; sync; sleep 1; (svc power reboot || reboot)";
         } else if (targetMode == MODE_CARLIFE) {
             targetName = "CarLife 模式（百度 USB AOA）";
-            desc = "重启后 USB 以百度 CarLife AOA 协议连接车机：\n• 1920×720@30fps 原生画面 + 触控\n• 媒体 / 导航 / 电话音频可在本页实时选择走 USB 或蓝牙\n• 不关闭车机原生蓝牙，Wi-Fi ADB (5555) 照常开启";
+            desc = "重启后 USB 以百度 CarLife AOA 协议连接车机：\n• 1920×720@30fps 原生画面 + 触控\n• 媒体 / 导航音频可选 USB 或蓝牙，电话可选车机蓝牙或经盒子 USB\n• 不关闭车机原生蓝牙，Wi-Fi ADB (5555) 照常开启";
             cmd = "setprop persist.sdcarplay.reverse.disable 0; setprop persist.tbox.carlife 1; sync; sleep 1; (svc power reboot || reboot)";
         } else {
             targetName = "USB ADB 模式（电脑调试）";
