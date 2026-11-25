@@ -161,6 +161,11 @@ if [ "$DO_LAUNCHER" = "1" ]; then
     esac
     if pm path com.tbox.carlauncher >/dev/null 2>&1; then
       pm install -r /data/local/tmp/TboxCarLauncher.apk
+      # pm install -r kills the running launcher; ActivityManager restarts HOME while the package
+      # is still frozen, fails (\"currently frozen\") and gives up, leaving a black screen until
+      # something starts HOME again. Bring it back explicitly once the install is done.
+      sleep 1
+      am start -a android.intent.action.MAIN -c android.intent.category.HOME >/dev/null 2>&1 || true
     fi
     rm -f /data/local/tmp/TboxCarLauncher.apk /data/local/tmp/TboxNoNavBarOverlay.apk /data/local/tmp/privapp-permissions-tboxcarlauncher.xml /data/local/tmp/tbox_vd_input.sh /data/local/tmp/tbox_rro_guard.sh /data/local/tmp/tbox_system.prop
     sync
