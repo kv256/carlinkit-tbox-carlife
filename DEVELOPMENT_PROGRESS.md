@@ -1,6 +1,6 @@
 # 开发进度跟踪
 
-> 最后更新：2026-11-24 · 分支 `fix/review-round7`（基于 `main` `f8cc04a`，未合并）
+> 最后更新：2026-11-25 · 分支 `feat/round8-hu-keys`（基于 `main` `5ddd4e3`，未合并）
 >
 > 本文件只记录**当前状态与待办**：每轮改动后更新「当前迭代」「盒子部署状态」「上车验证清单」，完成的事项移入「历史里程碑」。
 > 根因分析与设计细节写在 [docs/CUSTOMIZATIONS.md](docs/CUSTOMIZATIONS.md)，逐轮交接记录在 [docs/HANDOFF.md](docs/HANDOFF.md)，部署方法见 [docs/DEPLOY.md](docs/DEPLOY.md)。
@@ -18,18 +18,31 @@
 | 媒体 48kHz + 导航 16kHz TTS 分流 | ✅ | 长时间多场景复核未做 |
 | `call=usb` 电话双向通话 | ✅ | |
 | `call=usb` 回声消除（`EchoCanceller` 远端门控） | ✅ | Round 6b 用户确认听不到回音；通话质量待继续测 |
-| `call=bt` 经 `QCOM-BTD` 通话 | ⚫ | 需在 HFP AG 模拟真实通话 + 绕过音频 HAL，属独立新工作 |
+| `call=bt` 经 `QCOM-BTD` 通话 | ⚫ | 非硬件不可能：车机断 eSCO 是因盒子 HFP AG 无真实通话；需系统 ConnectionService 桥接 goc 通话状态 + 绕过音频 HAL（tinymix/tinyplay）。收益低于「电话=车机蓝牙」，不做 |
 | 手机蓝牙「仅音乐 / 音乐+电话」（`bt.phone`） | ✅ | iPhone 电话走原车蓝牙、音乐走盒子，已可分别连接 |
 | 仅音乐模式下 BT 音乐被静音 | 🏠 | Round 6c 修复，家中暂停/继续均恢复有声；XQBluetooth 界面仍显示"蓝牙已断开"（仅显示问题） |
 | 开机自动拉起 CarLife | 🟡 | 盒子已提前到 ~7–8 s 以 CarLife 设备出现；此前 4 次车上开机车机均未发起 AOA，待按受控步骤复测 |
 | TboxCarLauncher 16:9 驾舱桌面（v1.2+） | 🟡 | 9da347e…f8cc04a 引入，未记录完整车测结果 |
-| TboxUsbSwitch v1.6 | ✅ | 三模式切换、音频通道、回声消除档位、手机蓝牙选项 |
+| TboxUsbSwitch v1.7 | 📋 | 「电话音频」与「手机蓝牙」合并为「电话：车机蓝牙 / 经盒子 USB」，无效组合自动修正；未部署（v1.6 在盒子上） |
+| CarLife 模式下「原车」App 回到车机 | 🟡 | MdMain 发 `MSG_CMD_GO_TO_DESKTOP 0x10021`（经 `@tbox_carlife_md` 控制 socket，由 launcher 拦截 `com.ds.backcar`） |
+| 车机电话键（经盒子 USB 通话） | 📋 | CarLife `PHONE_CALL/END/END_MUTE` → goc `CE/CF/CG`；未部署 |
 | CarLife 模式隐藏 MainAiBox | 🏠 | Round 7 改为 `pm disable-user`，切模式不再丢数据 |
 | 开源发布准备 | 📋 | 见第 5 节「开源前清理」 |
 
 ---
 
-## 2. 当前迭代：Round 7（代码审查修复）
+## 2. 当前迭代：Round 8（车机按键与电话设置）
+
+| # | 问题 | 修复 | 状态 |
+| --- | --- | --- | --- |
+| 原车 | CarLife 模式下点「原车」不回车机 | 「原车」(`com.ds.backcar`) 只会经 MainAiBox 发 CarPlay 的 `requestReverseCarPlayReturnNativeUI`。MdMain 新增 `MdControlSocket`（抽象 socket `@tbox_carlife_md`，命令 `back_to_hu`）发 `0x10021`；车机 `CarlifeActivity` → `notifyBackToHU` → `ConnectMgr.Back()`。launcher 在 CarLife 模式拦截该包 | 🟡 jar/launcher 已部署，待车测 |
+| 挂断键 | 经盒子 USB 通话时车机挂断键无效 | MdMain 未映射 CarLife 键 2/3/4。daemon 把 sdsdk816 的 `MG` 状态写到 `/cache/carlife/bt.hfp`；`GocPhone` 按状态写 `AT#CE/CF/CG` 到 `/dev/goc_serial`，日志 `hu_phone_key` | 📋 未部署 |
+| 电话设置 | 「电话音频」「手机蓝牙」两项只有两种组合可用 | TboxUsbSwitch v1.7 合并为「电话」二选一，回声消除仅经盒子 USB 时可调 | 📋 未部署 |
+| 部署黑屏 | `deploy.sh --launcher` 重装时桌面被关、未自动拉起 | 安装后 `am start` HOME | ✅ |
+
+Codex 复审（`codex review --uncommitted`）：无问题。
+
+### Round 7（代码审查修复）
 
 来源：对 `9da347e..f8cc04a`（18 个提交）的代码审查，用户要求修复第 1–6 项；Codex 复审追加 3 项已一并修复；另修复 CarPlay 模式系统 dock。已提交到 `fix/review-round7`，未合并 `main`。
 
@@ -59,6 +72,8 @@
 | `/data/adb/post-fs-data.d/tbox_rro_guard.sh` | `018b80188fd77f11027116bdc01761fb49656830a0be1fe3274e528bc787d66a` |
 | `…/priv-app/TboxCarLauncher/TboxCarLauncher.apk` | `b3477bbf515e8de34e1ff0bb6ee98adefa335be1582c06b6f88bf91a6a091257` |
 
+2026-11-24 22:40 另部署：`carlife-md-api28.jar` `1b603b72…`（含「原车」，不含挂断键）、TboxCarLauncher `feb21000…`（拦截「原车」）。挂断键与 TboxUsbSwitch v1.7 尚未部署。
+
 当前模式：**CarPlay**（`persist.tbox.carlife=0`，22:05 重启验证）。CarLife 模式下的属性：`persist.tbox.carlife=1`、`audio.media=usb`、`audio.navi=usb`、`audio.call=bt`、`aec=3`、`aec.dump=1`、`bt.phone=media`、`fps=60`。
 
 > 注意：`audio.call=bt` 时电话不经过盒子（由车机原车蓝牙处理），这与 `bt.phone=media` 的用法一致；如需测 `call=usb` 回声，先在 TboxUsbSwitch 改回 USB。
@@ -75,6 +90,10 @@
 - [ ] **系统 dock**：CarPlay 与 CarLife 模式下左侧都不再出现原厂 dock，桌面铺满全宽。
 - [ ] **60fps 投屏**：画面流畅、无花屏，`MD_STARTED … fps=60`。
 - [ ] **`call=usb` 通话质量**：双方同时说话不吞字。
+- [ ] **原车**：CarLife 模式点「原车」，车机切回原车界面且 CarLife 不断开；日志 `back_to_hu_sent`。
+- [ ] **车机电话键**：电话=经盒子 USB，来电按接听键接起、挂断键拒接，通话中挂断键挂断；日志 `hu_phone_key … goc_command=CE/CF/CG`。
+- [ ] **TboxUsbSwitch v1.7**：切换「电话」后手机按新选项重连。
+- [ ] **视频核资源**：CarLife 60fps 投屏 + PiliPlus 1080P 同时使用时 PiliPlus 仍能硬解（不行则改 30fps 或 720P）。
 
 之后：`bash scripts/pull_logs.sh`，重点看 `/cache/carlife/logs/daemon.log`、`service.log`。
 
@@ -101,7 +120,7 @@
 
 ### 搁置
 
-- ⚫ `call=bt` 经 `QCOM-BTD`：需 HFP AG 模拟通话（`+CIEV` / `AT+CLCC`）+ `tinymix INTERNAL_BT_SCO` 采集，独立项目。
+- ⚫ `call=bt` 经 `QCOM-BTD`：盒子 Telecom 服务完整，信令可用系统 ConnectionService 桥接（约 1–2 天，可先验证车机是否保持 eSCO）；音频需 root `tinymix`/`tinyplay` 绕过 HAL，风险高。现方案「电话=车机蓝牙」更优，不做。
 
 ---
 
@@ -114,4 +133,5 @@
 | Round 5 | `261765a` `36a4c6a` `972fd22` `027bfab` | 通话回声消除；TboxUsbSwitch v1.5；QCOM-BTD interop 实验；开机提前出现 CarLife 设备 | 回声未消、开机未拉起 |
 | Round 6 / 6b / 6c | `d699fb5` `f278f4e` `c477f21` `3818ca5` | 远端门控残余回声抑制；开机内核日志 AOA 监听；post-fs-data 早期 USB；手机蓝牙仅音乐；仅音乐静音修复；TboxUsbSwitch v1.6 | 回声 ✅、蓝牙分连 ✅、开机拉起待测 |
 | Launcher | `9da347e` … `f8cc04a` | TboxCarLauncher 驾舱桌面、BT 媒体桥、AMap HUD、60fps 开关、USB 字符串屏蔽 + os_desc、RRO 防开机循环、开源发布准备 | 🟡 |
-| Round 7 | `aa6558a` … | 代码审查修复 #1–#6 + Codex 复审 3 项；系统 dock（PackageManager 解析缓存） | 🏠 / 🟡 |
+| Round 7 | `aa6558a` … `5ddd4e3` | 代码审查修复 #1–#6 + Codex 复审 3 项；系统 dock（PackageManager 解析缓存） | 🏠 / 🟡 |
+| Round 8 | `feat/round8-hu-keys` | 「原车」回车机、车机电话键、TboxUsbSwitch v1.7 电话合并、部署后拉起桌面 | 🟡 / 📋 |
