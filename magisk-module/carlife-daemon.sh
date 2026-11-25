@@ -417,6 +417,8 @@ sync_bt_a2dp_priority_when_booted() {
 PROP_BT_PHONE=persist.tbox.carlife.bt.phone
 GOC_TTY=/dev/goc_serial
 GOC_CONF=/data/goc/bt_conf.ini
+# Current HFP state (MG value) for MdMain's HU phone keys (GocPhone.java): answer/reject/end.
+HFP_STATE_FILE=$RUN/bt.hfp
 
 goc_cmd() { printf 'AT#%s\r\n' "$1" > "$GOC_TTY" 2>/dev/null; }
 
@@ -432,7 +434,7 @@ bt_phone_mode() { [ "$(getprop "$PROP_BT_PHONE" 2>/dev/null)" = "media" ] && ech
 start_bt_profile_watch() {
     stop_pid "$BTW_PID"; BTW_PID=""
     fifo="$RUN/btwatch.fifo"
-    rm -f "$fifo"
+    rm -f "$fifo" "$HFP_STATE_FILE"   # /cache survives reboots: never leave a stale call state
     mkfifo -m 600 "$fifo" 2>/dev/null || return 0
     (
         k=""
@@ -443,7 +445,7 @@ start_bt_profile_watch() {
         k=$!
         # logcat replays its buffer first; this line marks where live events start
         /system/bin/log -t carlife-btwatch "$tag"
-        armed=0 hfst=1 av=0 addr="" mode="" checked=-10 tries=0 tries_since=0 unmute_at=-10 unmute_log=-100
+        armed=0 hfst=1 av=0 addr="" mode="" checked=-10 tries=0 tries_since=0 unmute_at=-10 unmute_log=-100 hf_pub=""
         while IFS= read -r line; do
             want_unmute=0
             case "$line" in
@@ -460,6 +462,10 @@ start_bt_profile_watch() {
                 *"a2dp_player_start(int, int, int): start succ"*|*"A2dp mute!!!!"*) want_unmute=1 ;;
             esac
             [ "$armed" = 1 ] || continue
+            if [ "$hfst" != "$hf_pub" ]; then
+                echo "$hfst" > "$HFP_STATE_FILE.tmp" 2>/dev/null && mv -f "$HFP_STATE_FILE.tmp" "$HFP_STATE_FILE"
+                hf_pub=$hfst
+            fi
             read _bu _bi < /proc/uptime
             now=${_bu%%.*}
             prev=$mode

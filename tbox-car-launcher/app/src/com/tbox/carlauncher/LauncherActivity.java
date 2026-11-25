@@ -9,6 +9,8 @@ import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.graphics.Bitmap;
 import android.net.ConnectivityManager;
+import android.net.LocalSocket;
+import android.net.LocalSocketAddress;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -25,6 +27,9 @@ import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -469,6 +474,10 @@ public class LauncherActivity extends Activity {
 
     private void openAppInViewport(String pkg) {
         if (TextUtils.isEmpty(pkg) || viewport == null) return;
+        if (BACK_CAR_PKG.equals(pkg) && isCarLifeMode()) {
+            requestCarLifeBackToHu();
+            return;
+        }
         hasLaunchedAnyApp = true;
         setRecentsVisible(false);
         setDrawerVisible(false);
@@ -476,6 +485,62 @@ public class LauncherActivity extends Activity {
         if (!ok && viewport.isReady()) {
             Toast.makeText(this, "未找到应用：" + pkg, Toast.LENGTH_SHORT).show();
         }
+    }
+
+    // OEM "原车" app: it asks MainAiBox to return the head unit to its own UI, which is a CarPlay
+    // (reverse CarPlay) request and does nothing in CarLife mode. There MdMain sends the CarLife
+    // MSG_CMD_GO_TO_DESKTOP instead, requested over its local control socket.
+    private static final String BACK_CAR_PKG = "com.ds.backcar";
+    private static final String MD_CONTROL_SOCKET = "tbox_carlife_md";
+
+    private static String sysProp(String key, String def) {
+        try {
+            Class<?> sp = Class.forName("android.os.SystemProperties");
+            return (String) sp.getMethod("get", String.class, String.class).invoke(null, key, def);
+        } catch (Throwable t) {
+            return def;
+        }
+    }
+
+    private static boolean isCarLifeMode() {
+        return "1".equals(sysProp("persist.tbox.carlife", "0"))
+            && !"1".equals(sysProp("persist.sdcarplay.reverse.disable", "0"));
+    }
+
+    private void requestCarLifeBackToHu() {
+        bgExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                String reply;
+                LocalSocket socket = new LocalSocket();
+                try {
+                    socket.connect(new LocalSocketAddress(MD_CONTROL_SOCKET, LocalSocketAddress.Namespace.ABSTRACT));
+                    socket.setSoTimeout(1500);
+                    OutputStream out = socket.getOutputStream();
+                    out.write("back_to_hu\n".getBytes(StandardCharsets.US_ASCII));
+                    out.flush();
+                    InputStream in = socket.getInputStream();
+                    StringBuilder sb = new StringBuilder();
+                    int b;
+                    while (sb.length() < 32 && (b = in.read()) != -1 && b != '\n') sb.append((char) b);
+                    reply = sb.toString().trim();
+                } catch (Throwable t) {
+                    reply = "unreachable";
+                    Log.w(TAG, "back_to_hu: MdMain control socket unavailable", t);
+                } finally {
+                    try { socket.close(); } catch (Throwable ignored) {}
+                }
+                Log.i(TAG, "back_to_hu reply=" + reply);
+                if (!"ok".equals(reply)) {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            Toast.makeText(LauncherActivity.this, "CarLife 未连接车机，无法返回原车", Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                }
+            }
+        });
     }
 
     private void setDrawerVisible(boolean show) {

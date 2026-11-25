@@ -125,6 +125,7 @@ public final class MdMain {
                 try{Thread.sleep(100);}catch(InterruptedException e){break;}
             }
         }},"md-watchdog"); watchdog.setDaemon(true);watchdog.start();
+        if(nativeUsb)MdControlSocket.start();
         long lastAccessoryWaitLog=0;String lastAccessoryWaitError=null;
         boolean controllerCompleted=false;
         try {
@@ -382,6 +383,15 @@ public final class MdMain {
             }
         }
         boolean nativeCompatibility(){return transport.isNativeUsb()&&huMajor>=2;}
+        /** MSG_CMD_GO_TO_DESKTOP (0x10021): the HU's CarlifeActivity handles it with
+         *  CarLifeSubject.notifyBackToHU() -> ConnectMgr.Back(), i.e. it shows its own UI while
+         *  the session stays connected. Called from MdControlSocket (OEM "原车" app via launcher). */
+        boolean requestBackToHu(String source){
+            if(!open||!version||!nativeCompatibility()){logFields("back_to_hu_rejected","session_id",sessionId,"open",open,"version",version,"source",source);return false;}
+            try{send(CMD,0x10021,NativeSessionProtocol.EMPTY);}
+            catch(IOException e){logFields("back_to_hu_failed","session_id",sessionId,"error",e.toString(),"source",source);return false;}
+            logFields("back_to_hu_sent","session_id",sessionId,"command","0x10021","source",source);return true;
+        }
         private static volatile Method audioSysIsStreamActive,audioSysGetForceUse,audioSysSetForceUse;
         private static volatile boolean audioSysResolved;
         private static void resolveAudioSystem(){
@@ -975,6 +985,15 @@ public final class MdMain {
             }});
         }
         void checkInputTimeout(){if(!transport.isNativeUsb())sink.cancelIfIdle();}
+        /** HU phone keys -> sdsdk816 answer / reject / end (see GocPhone). */
+        void phoneKey(int key){
+            int state=GocPhone.hfpState();
+            Api28MicBridge m=micBridge;
+            boolean callAudio=AudioUsage.isCallUsb()&&m!=null&&m.isCallRecordingActive();
+            String command=GocPhone.commandFor(key,state,callAudio);
+            boolean sent=command!=null&&GocPhone.send(command);
+            logFields("hu_phone_key","session_id",sessionId,"carlife_key",key,"hfp_state",state,"call_audio",callAudio,"goc_command",command,"sent",sent);
+        }
         void dispatchTouch(int id,byte[] p,Map<Integer,Object> fields)throws IOException {
             if(!transport.isNativeUsb())++touchCount;
             if(!version||!initialized)throw new IOException("touch requires initialized session");
@@ -993,6 +1012,7 @@ public final class MdMain {
                     triggerVoiceAssistant(false,"hardkey_34");
                     return;
                 }
+                if(GocPhone.isPhoneKey(key)){phoneKey(key);return;}
                 boolean handled=false;
                 if(androidKeyCodeForCarLife(key)>=0){sink.hardkey(key);handled=true;}
                 if(handled){if(key==0x1f)explicitMediaPlay();else if(key==0x20)explicitMediaPause();}
