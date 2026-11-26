@@ -27,7 +27,7 @@
 | CarLife 模式下「原车」App 回到车机 | 🟡 | MdMain 发 `MSG_CMD_GO_TO_DESKTOP 0x10021`（经 `@tbox_carlife_md` 控制 socket，由 launcher 拦截 `com.ds.backcar`） |
 | 车机电话键（经盒子 USB 通话） | 📋 | CarLife `PHONE_CALL/END/END_MUTE` → goc `CE/CF/CG`；未部署 |
 | CarLife 模式隐藏 MainAiBox | ✅ | Round 9 改为 `pm hide`：开机不再启动（无「设备未激活」），切模式数据不丢 |
-| 开源发布准备 | 📋 | 见第 5 节「开源前清理」 |
+| 开源发布准备 | 🔧 | 历史已清理（第 5 节）；待推送公开仓库 |
 
 ---
 
@@ -106,7 +106,7 @@ Codex 复审（`codex review --uncommitted`）：无问题。
 - [ ] **TboxUsbSwitch v1.7**：切换「电话」后手机按新选项重连。
 - [ ] **视频核资源**：CarLife 60fps 投屏 + PiliPlus 1080P 同时使用时 PiliPlus 仍能硬解（不行则改 30fps 或 720P）。
 
-之后：`bash scripts/pull_logs.sh`，重点看 `/cache/carlife/logs/daemon.log`、`service.log`。
+回家后：`bash scripts/pull_logs.sh`，重点看 `/cache/carlife/logs/daemon.log`、`service.log`。
 
 ---
 
@@ -125,7 +125,7 @@ Codex 复审（`codex review --uncommitted`）：无问题。
 ### 工程与发布
 
 - [ ] `scripts/deploy.sh`：子项目编译失败（如未设 `ANDROID_SDK_DIR`）时静默退出，模块未安装、守护进程未重启，需报错提示。
-- [ ] 开源前清理：git 历史含车机 MAC（972fd22、6b29fc0）与手机设备名；`docs/HANDOFF.md`、`scripts/deploy.sh`、`scripts/pull_logs.sh` 含家庭网络 IP；三个 `build.sh` 含 `$HOME/…` 回退路径。需新历史发布或清理。
+- [x] 开源前清理（2026-11-26）：重写全部历史，去掉车机完整 MAC、手机设备名、盒子序列号、家庭网络 IP 与本机路径；提交者统一为新身份。脚本不再内置地址，改为 `--serial` 或 `.env` 的 `TBOX_ADB_IPS`。
 - [ ] 确认 CarLife 模式下是否有功能依赖 `com.carsyso.main`（`TechBtMusicClient` 以其 `MainService` 作为次要数据源）。
 - [ ] RRO 缓存清理逻辑分散在三处（`post-fs-data.sh`、`tbox_rro_guard.sh`、`deploy.sh`），可合并。
 

@@ -42,6 +42,7 @@ bash scripts/deploy.sh --serial <盒子IP>:5555 --launcher
 bash scripts/pull_logs.sh                            # 拉日志到 logs/<时间戳>/
 ```
 
+- 盒子地址用 `--serial` 传入，或写在 `.env`（git 忽略，模板 `.env.example`）的 `TBOX_ADB_IPS` 里；**代码、注释和文档里都不写具体 IP**，也不按使用地点区分地址。
 - `--launcher` 会把 `DO_JAR` 置 0，参数顺序有影响；要同时部署时分两次执行或用 `--all`。
 - `deploy.sh` 在子项目现编失败时会**静默退出**（`set -e`），务必确认输出里有 `Respawning init-managed carlife-daemon...` 和模块文件 push 记录，必要时在盒子上 `sha256sum` 核对。
 - 部署前先备份盒子上将被覆盖的文件（惯例：`/data/adb/carlife/*.<轮次>.bak`）。

@@ -12,7 +12,7 @@
 - **工具链与密钥**：
   - Android SDK API 28 与 `adb` 分别默认位于仓库同级 `../tools/android-sdk` 与 `../tools/linux/platform-tools/adb`（可通过 `ANDROID_SDK_DIR` / `ADB_BIN` 覆盖）
   - APK 签名库位于仓库内 `.keystore/usbswitch-release.jks`（已 `.gitignore`，切勿删除或提交到版本库）
-  - 盒子 Wi-Fi ADB 地址：用 `--serial <盒子IP>:5555` 传入
+  - 盒子 Wi-Fi ADB 地址：用 `--serial <盒子IP>:5555` 传入，或写在 `.env` 的 `TBOX_ADB_IPS`（见 `.env.example`）
 
 ---
 
@@ -71,7 +71,7 @@
 1. **直接上车测试（无需带电脑）**：
    - 保持 `TboxUsbSwitch` 中 `媒体=USB`、`导航=USB`、`电话=USB`，手机蓝牙连接盒子拨打/接听电话，验证：**双向语音清晰、无回声、挂断后音乐与导航自动恢复且无崩溃**。
    - 长时间播放音乐 + 高德导航播报 + 频繁切换 App，复核是否彻底无音频卡顿。
-2. **拉取完整落盘日志复盘**（盒子内置 `savelog` 会跨重启持久保存 Android/内核日志至 `/storage/emulated/0/x7_Log/`）：
+2. **回家拉取完整落盘日志复盘**（盒子内置 `savelog` 会跨重启持久保存 Android/内核日志至 `/storage/emulated/0/x7_Log/`）：
    ```bash
    bash scripts/pull_logs.sh --full
    ```

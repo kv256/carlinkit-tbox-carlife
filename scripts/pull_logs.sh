@@ -1,21 +1,27 @@
 #!/usr/bin/env bash
 # Pull persisted CarLife logs (/cache/carlife/logs) + live device audio/BT state into git-ignored logs/<timestamp>/.
-# Usage: scripts/pull_logs.sh [adb-serial] [--full]
+# Usage: scripts/pull_logs.sh [--serial HOST:PORT | adb-serial] [--full]
 #   --full  Also pull the latest persisted Android/kernel logcat from /storage/emulated/0/x7_Log/ and tombstones.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# Local, git-ignored settings (see .env.example): TBOX_ADB_IPS, ADB_BIN.
+if [ -f "$REPO/.env" ]; then set -a; . "$REPO/.env"; set +a; fi
 ADB="${ADB_BIN:-$REPO/../tools/linux/platform-tools/adb}"
-DEFAULT_IPS=()
+# Wi-Fi ADB addresses tried in order when no device is connected and none is given.
+read -r -a DEFAULT_IPS <<< "${TBOX_ADB_IPS:-}"
 SERIAL=""
 FULL=0
 
-for arg in "$@"; do
-  case "$arg" in
-    --full) FULL=1 ;;
-    *) [ -z "$SERIAL" ] && SERIAL="$arg" ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --full) FULL=1; shift ;;
+    --serial|-s) SERIAL="$2"; shift 2 ;;
+    -*) echo "Unknown arg: $1" >&2; exit 2 ;;
+    *) SERIAL="$1"; shift ;;
   esac
 done
+if [ -n "$SERIAL" ]; then "$ADB" connect "$SERIAL" >/dev/null 2>&1 || true; fi
 
 if [ -z "$SERIAL" ]; then
   SERIAL=$("$ADB" devices | awk 'NR>1 && $2=="device" {print $1; exit}')
@@ -28,7 +34,7 @@ if [ -z "$SERIAL" ]; then
     fi
   done
 fi
-[ -n "$SERIAL" ] || { echo "ERROR: No Tbox ADB device reachable." >&2; exit 1; }
+[ -n "$SERIAL" ] || { echo "ERROR: No Tbox ADB device reachable: pass --serial <box-ip>:5555 or set TBOX_ADB_IPS in .env." >&2; exit 1; }
 
 TS="$(date '+%Y%m%d-%H%M%S')"
 OUT="$REPO/logs/$TS"

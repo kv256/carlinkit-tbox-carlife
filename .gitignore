@@ -23,3 +23,6 @@ logs/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Local settings (box addresses, tool paths)
+.env

@@ -5,8 +5,11 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# Local, git-ignored settings (see .env.example): TBOX_ADB_IPS, ADB_BIN.
+if [ -f "$REPO/.env" ]; then set -a; . "$REPO/.env"; set +a; fi
 ADB="${ADB_BIN:-$REPO/../tools/linux/platform-tools/adb}"
-DEFAULT_IPS=()
+# Wi-Fi ADB addresses tried in order when no device is connected and none is given.
+read -r -a DEFAULT_IPS <<< "${TBOX_ADB_IPS:-}"
 
 SERIAL=""
 DO_JAR=1
@@ -45,7 +48,7 @@ pick_device() {
       return
     fi
   done
-  echo "ERROR: No Tbox ADB device reachable." >&2
+  echo "ERROR: No Tbox ADB device reachable: pass --serial <box-ip>:5555 or set TBOX_ADB_IPS in .env." >&2
   exit 1
 }
 

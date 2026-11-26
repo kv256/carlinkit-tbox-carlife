@@ -217,6 +217,9 @@ bash scripts/pull_logs.sh --serial <盒子IP>:5555
 # 如需连同系统持久化日志 x7_Log 一并拉取：
 bash scripts/pull_logs.sh --serial <盒子IP>:5555 --full
 ```
+
+地址也可以写进仓库根目录的 `.env`（从 `.env.example` 复制，已被 git 忽略）：`TBOX_ADB_IPS="<盒子IP>:5555"`，之后脚本可省略 `--serial`。
+
 日志会保存到仓库下的 `logs/<时间戳>/`（已 `.gitignore`），其中包含：
 - `daemon.log`：开机 USB 枚举与 AOA 握手时间线
 - `boot_usb_trace.log` / `boot_usb_kmsg.log`：硬件级 `dwc3` 开机前 45 秒 USB EP0 抓包（不受 `x7_Log` 滚动覆盖）
