@@ -60,7 +60,7 @@ bash scripts/pull_logs.sh                            # 拉日志到 logs/<时间
 - **USB / AOA 时序**：车机只在自身开机时做一次 USB 扫描（约盒子 uptime 10–11 s），所以 CarLife 身份在 `post-fs-data.sh` 中约 7 s 发布并交接给 daemon（`$RUN/usb.daemon`）。原厂 init 的 `sys.usb.config=none && sys.usb.configfs=1` 会解绑 gadget，CarLife 模式必须用 `sys.usb.config=carlife`（无触发器匹配）。AOA START 以内核日志 `mtp_ctrlrequest:1421` 为准（uevent 会因车机 11 ms 后复位而丢失）。
 - **post-fs-data 阶段**持久属性尚未加载，用 `magisk resetprop -p` 读取；Magisk 在此阶段之后才做 magic mount。
 - **静态 RRO**：Android 9 的 `/data/resource-cache/overlays.list` 与模块内 overlay APK 不一致会导致 system_server 开机循环；改动 overlay 后必须清理该缓存（`deploy.sh` 与 `tbox_rro_guard.sh` 已处理）。
-- **系统 App 隐藏**：不要用 Magisk `.replace` 移除系统 APK——Android 9 会清空该包数据；用 `pm disable-user`（见 `service.d/tbox_vd_input.sh`）。
+- **系统 App 隐藏**：不要用 Magisk `.replace` 移除系统 APK——Android 9 会清空该包数据。**persistent 应用**（如 MainAiBox `com.carsyso.main`，会弹「设备未激活」）`pm disable-user` 后开机仍会被拉起，`force-stop` 也杀不掉；用 `pm hide`（数据保留，**下次开机**起不再启动）。它必须在重启进 CarPlay **之前** `pm unhide`：system_server 很早就启动其 `MainService`，各 SDK 客户端的 `MainSDKService` 只在 `onCreate` 绑定一次。TboxUsbSwitch 切模式时处理，`service.d/tbox_vd_input.sh` 兜底（归属标记 `/cache/carlife/.mainaibox_hidden`）。隐藏的包不在 `pm list packages` / `pm path` 中，需加 `-u`；隐藏会丢弃其 appops 设置。
 - **goc 蓝牙栈**：命令写 `/dev/goc_serial`（`AT#xx`，见盒子 `/system/config.ini`），配对序号 1 起；`SE` 会断开全部 profile。
 - 盒子开机时钟可能是 2009 年，不要按时间戳排序/清理文件，用序号。
 - **PackageManager 解析缓存**（`/data/system/package_cache/*/<APK名或包目录名>-<flags>`）只要比 APK 的 mtime 新就会复用；时钟未对时部署的文件 mtime 是 1970，改了 APK 也不会重新解析（曾导致去导航栏 overlay 一直按 static 处理、拿不到 idmap）。模块 `post-fs-data.sh` 每次开机会清掉本模块 APK 的缓存；排查 overlay/priv-app 不生效时先看 `dumpsys overlay` 的 `mState`。

@@ -36,25 +36,66 @@
     slog "MODULE_REENABLED after an incomplete boot (one-shot)"
   fi
 
-  # MainAiBox (com.carsyso.main, CarPlay-only middleware) is disabled -- not removed, so its data
-  # survives -- while CarLife is the active mode, and enabled again otherwise (CarPlay / USB ADB
-  # mode, module disabled). Mode switches always reboot, so checking once per boot is enough.
-  # The stamp records that we disabled it, so a package disabled by someone else is left alone.
+  # MainAiBox (com.carsyso.main, CarPlay-only middleware) is hidden with "pm hide" while CarLife is
+  # the active mode, and unhidden otherwise (CarPlay / USB ADB mode, module disabled). It is a
+  # PERSISTENT system app: Android 9 starts those at boot even when disabled-user, and it then
+  # keeps a "设备未激活" toast up; hidden packages are not started, and their data survives.
+  # TboxUsbSwitch does the same before it reboots into another mode, so this normally finds
+  # nothing to do; it covers mode switches made any other way. The stamp records that we hid the
+  # package, so one hidden by someone else is left alone.
   MAIN_PKG=com.carsyso.main
-  MAIN_STAMP=$STATE/.mainaibox_disabled
+  MAIN_STAMP=$STATE/.mainaibox_hidden
+  TOAST_STAMP=$STATE/.mainaibox_toast_ignored
   CARLIFE_ACTIVE=0
   if [ "$(getprop persist.tbox.carlife 2>/dev/null)" = "1" ] &&
      [ "$(getprop persist.sdcarplay.reverse.disable 2>/dev/null)" != "1" ] &&
      [ "$MOD_MOUNTED" = "1" ]; then
     CARLIFE_ACTIVE=1
   fi
-  if pm path "$MAIN_PKG" >/dev/null 2>&1; then
-    if [ "$CARLIFE_ACTIVE" = "1" ]; then
-      if ! pm list packages -d 2>/dev/null | grep -qx "package:$MAIN_PKG"; then
-        pm disable-user --user 0 "$MAIN_PKG" >/dev/null 2>&1 && : > "$MAIN_STAMP" && slog "MAINAIBOX_DISABLED"
+  # Hidden packages are absent from "pm list packages" (they only show with -u).
+  main_visible() { pm list packages "$MAIN_PKG" 2>/dev/null | grep -qx "package:$MAIN_PKG"; }
+  # Older versions used disable-user; undo it (only if it was ours).
+  if [ -f "$STATE/.mainaibox_disabled" ]; then
+    pm enable "$MAIN_PKG" >/dev/null 2>&1 && rm -f "$STATE/.mainaibox_disabled" && slog "MAINAIBOX_ENABLED (migrated)"
+  fi
+  if [ "$CARLIFE_ACTIVE" = "1" ]; then
+    if main_visible; then
+      # A persistent process that is already up cannot be stopped, so for the rest of this boot
+      # hide its toast windows via appops instead.
+      appops set "$MAIN_PKG" TOAST_WINDOW ignore >/dev/null 2>&1 && : > "$TOAST_STAMP"
+      : > "$MAIN_STAMP"
+      pm hide "$MAIN_PKG" >/dev/null 2>&1
+      if main_visible; then
+        rm -f "$MAIN_STAMP"
+        slog "MAINAIBOX_HIDE_FAILED"
+      else
+        slog "MAINAIBOX_HIDDEN (effective from next boot)"
       fi
-    elif [ -f "$MAIN_STAMP" ]; then
-      pm enable "$MAIN_PKG" >/dev/null 2>&1 && rm -f "$MAIN_STAMP" && slog "MAINAIBOX_ENABLED"
+    fi
+  else
+    if [ -f "$MAIN_STAMP" ]; then
+      pm unhide "$MAIN_PKG" >/dev/null 2>&1
+      if main_visible; then
+        rm -f "$MAIN_STAMP"
+        # system_server's own start of this service at boot found no such package
+        am startservice -n "$MAIN_PKG/.core.MainService" >/dev/null 2>&1
+        # ... and the SDK clients (MainUI, FloatingBall, XQBluetooth, ...) bind to it only once, in
+        # their service's onCreate: restart those services so that they bind now.
+        sleep 2
+        n=0
+        for svc in $(dumpsys activity services 2>/dev/null |
+                     sed -n 's#^ *\* ServiceRecord{[0-9a-f]* u0 \([^ /]*/com\.carsyso\.mainsdk\.core\.MainSDKService\)}.*#\1#p' | sort -u); do
+          am stopservice -n "$svc" >/dev/null 2>&1
+          am startservice -n "$svc" >/dev/null 2>&1
+          n=$((n + 1))
+        done
+        slog "MAINAIBOX_UNHIDDEN clients=$n"
+      else
+        slog "MAINAIBOX_UNHIDE_FAILED"
+      fi
+    fi
+    if [ -f "$TOAST_STAMP" ] && main_visible; then
+      appops set "$MAIN_PKG" TOAST_WINDOW default >/dev/null 2>&1 && rm -f "$TOAST_STAMP"
     fi
   fi
 

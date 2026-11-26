@@ -68,7 +68,7 @@ if [ "$($RP -p persist.tbox.usb.ftrace 2>/dev/null)" = "1" ]; then
     WANT_FTRACE=1
 fi
 
-# MainAiBox (com.carsyso.main) is hidden in CarLife mode with "pm disable-user" by
+# MainAiBox (com.carsyso.main) is hidden in CarLife mode with "pm hide" by
 # /data/adb/service.d/tbox_vd_input.sh. It used to be hidden here with a Magisk .replace, but a
 # system APK that disappears at boot makes Android 9 wipe the package's data, so every
 # CarLife -> CarPlay switch reset MainAiBox. Remove any .replace left by older versions.

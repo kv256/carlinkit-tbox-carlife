@@ -26,12 +26,22 @@
 | TboxUsbSwitch v1.7 | 📋 | 「电话音频」与「手机蓝牙」合并为「电话：车机蓝牙 / 经盒子 USB」，无效组合自动修正；未部署（v1.6 在盒子上） |
 | CarLife 模式下「原车」App 回到车机 | 🟡 | MdMain 发 `MSG_CMD_GO_TO_DESKTOP 0x10021`（经 `@tbox_carlife_md` 控制 socket，由 launcher 拦截 `com.ds.backcar`） |
 | 车机电话键（经盒子 USB 通话） | 📋 | CarLife `PHONE_CALL/END/END_MUTE` → goc `CE/CF/CG`；未部署 |
-| CarLife 模式隐藏 MainAiBox | 🏠 | Round 7 改为 `pm disable-user`，切模式不再丢数据 |
+| CarLife 模式隐藏 MainAiBox | ✅ | Round 9 改为 `pm hide`：开机不再启动（无「设备未激活」），切模式数据不丢 |
 | 开源发布准备 | 📋 | 见第 5 节「开源前清理」 |
 
 ---
 
-## 2. 当前迭代：Round 8（车机按键与电话设置）
+## 2. 当前迭代：Round 9（「设备未激活」回归）
+
+| # | 问题 | 修复 | 状态 |
+| --- | --- | --- | --- |
+| 设备未激活 | Round 7 的 `pm disable-user` 拦不住 persistent 应用：MainAiBox 开机仍以 `added application` 启动并弹 Toast | 改用 `pm hide`；`tbox_vd_input.sh` 迁移旧标记，隐藏当次开机用 appops 屏蔽 Toast | ✅ 车上确认不再显示 |
+| CarPlay 恢复 | 开机完成后才恢复时，`MainService` 未启动，SDK 客户端只绑定一次，实测 6 个只剩 1 个 | 兜底路径补启动 `MainService` 并重启各 `MainSDKService`（实测 5 个系统客户端恢复，launcher 的次要数据源需再重启一次） | 🏠 已部署 |
+| 切换 App | 重启前应先隐藏 / 取消隐藏 | TboxUsbSwitch 切模式命令加入 `pm hide` / `pm unhide`（命令已在盒子实测，6 个客户端全部恢复） | 📋 随 v1.7，未部署 |
+
+家中实测：迁移 → CarPlay（兜底）→ CarLife → CarPlay（预先取消隐藏）→ CarPlay（兜底+重绑）→ CarLife；MainAiBox 设置、数据库 hash 与 inode 始终不变。CarPlay 模式未接车机时 `com.android.se` / `com.android.phone` 周期性 ANR 与本改动无关（MainAiBox 正常启动时同样出现）。卸载脚本的恢复未实测。
+
+### Round 8（车机按键与电话设置）
 
 | # | 问题 | 修复 | 状态 |
 | --- | --- | --- | --- |
@@ -86,7 +96,8 @@ Codex 复审（`codex review --uncommitted`）：无问题。
 - [ ] **码率（Round 7 #4）**：30fps 投屏，网络/USB 拥塞时画面约 1 s 内恢复。
 - [ ] **BT 进度条（#5 #6）**：播放无歌手曲目不归零；暂停、继续后不回跳。
 - [ ] **仅音乐模式**：放歌 → 暂停 → 再放，一直有声，日志有 `BT_PHONE_MUSIC_UNMUTED`。
-- [ ] **MainAiBox（#1）**：切到 CarPlay 并重启后 `com.carsyso.main` 重新启用；再切回 CarLife 后其设置仍在。
+- [x] **MainAiBox（Round 9）**：CarLife 模式不再出现「设备未激活」。
+- [ ] **MainAiBox（Round 9）**：切到 CarPlay 后原厂 CarPlay 能正常连接。
 - [ ] **系统 dock**：CarPlay 与 CarLife 模式下左侧都不再出现原厂 dock，桌面铺满全宽。
 - [ ] **60fps 投屏**：画面流畅、无花屏，`MD_STARTED … fps=60`。
 - [ ] **`call=usb` 通话质量**：双方同时说话不吞字。

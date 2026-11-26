@@ -776,6 +776,17 @@ public class MainActivity extends Activity {
         return true;
     }
 
+    // MainAiBox (CarPlay middleware) must be hidden before a boot into CarLife and visible before any
+    // other boot: system_server starts it early, before tbox_vd_input.sh (the fallback) can act.
+    // Same stamp as tbox_vd_input.sh: only a package we hid ourselves is unhidden.
+    private static final String HIDE_MAINAIBOX =
+            "if pm list packages com.carsyso.main | grep -qx package:com.carsyso.main; then"
+            + " mkdir -p /cache/carlife; : > /cache/carlife/.mainaibox_hidden;"
+            + " pm hide com.carsyso.main | grep -q 'state: true' || rm -f /cache/carlife/.mainaibox_hidden; fi; ";
+    private static final String SHOW_MAINAIBOX =
+            "if [ -f /cache/carlife/.mainaibox_hidden ]; then pm unhide com.carsyso.main | grep -q 'state: false'"
+            + " && rm -f /cache/carlife/.mainaibox_hidden; fi; ";
+
     private void confirmAndSwitchMode(int targetMode) {
         if (!ensureRootOrPrompt()) return;
         if (targetMode == MODE_CARLIFE && !carlifeInstalled) {
@@ -793,15 +804,15 @@ public class MainActivity extends Activity {
         if (targetMode == MODE_CARPLAY) {
             targetName = "CarPlay 模式（原厂协议）";
             desc = "重启后 USB 恢复原厂 CarPlay 互联，且开机自动开启 Wi-Fi ADB (5555)。";
-            cmd = "setprop persist.sdcarplay.reverse.disable 0; setprop persist.tbox.carlife 0; sync; sleep 1; (svc power reboot || reboot)";
+            cmd = SHOW_MAINAIBOX + "setprop persist.sdcarplay.reverse.disable 0; setprop persist.tbox.carlife 0; sync; sleep 1; (svc power reboot || reboot)";
         } else if (targetMode == MODE_CARLIFE) {
             targetName = "CarLife 模式（百度 USB AOA）";
             desc = "重启后 USB 以百度 CarLife AOA 协议连接车机：\n• 1920×720@30fps 原生画面 + 触控\n• 媒体 / 导航音频可选 USB 或蓝牙，电话可选车机蓝牙或经盒子 USB\n• 不关闭车机原生蓝牙，Wi-Fi ADB (5555) 照常开启";
-            cmd = "setprop persist.sdcarplay.reverse.disable 0; setprop persist.tbox.carlife 1; sync; sleep 1; (svc power reboot || reboot)";
+            cmd = HIDE_MAINAIBOX + "setprop persist.sdcarplay.reverse.disable 0; setprop persist.tbox.carlife 1; sync; sleep 1; (svc power reboot || reboot)";
         } else {
             targetName = "USB ADB 模式（电脑调试）";
             desc = "重启后请将盒子接入电脑使用 USB ADB / scrcpy（此模式下暂停车机互联）。";
-            cmd = "setprop persist.sdcarplay.reverse.disable 1; setprop persist.tbox.carlife 0; sync; sleep 1; (svc power reboot || reboot)";
+            cmd = SHOW_MAINAIBOX + "setprop persist.sdcarplay.reverse.disable 1; setprop persist.tbox.carlife 0; sync; sleep 1; (svc power reboot || reboot)";
         }
 
         new AlertDialog.Builder(this)

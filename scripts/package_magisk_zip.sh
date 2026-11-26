@@ -203,9 +203,21 @@ sync
   done
   pm enable com.android.launcher3 >/dev/null 2>&1 || true
   cmd package set-home-activity com.android.launcher3/.Launcher >/dev/null 2>&1 || true
-  # re-enable MainAiBox only if tbox_vd_input.sh disabled it (a user's own disable is kept)
+  # restore MainAiBox only if we hid / disabled it (a user's own choice is kept)
   [ -f /cache/carlife/.mainaibox_disabled ] && pm enable com.carsyso.main >/dev/null 2>&1 || true
-  rm -f /cache/carlife/.mainaibox_disabled /cache/carlife/.boot_pending /cache/carlife/.boot_failed /cache/carlife/.reenable_tried
+  if [ -f /cache/carlife/.mainaibox_hidden ]; then
+    pm unhide com.carsyso.main >/dev/null 2>&1 || true
+    am startservice -n com.carsyso.main/.core.MainService >/dev/null 2>&1 || true
+    # same client rebind as tbox_vd_input.sh
+    sleep 2
+    for svc in $(dumpsys activity services 2>/dev/null |
+                 sed -n 's#^ *\* ServiceRecord{[0-9a-f]* u0 \([^ /]*/com\.carsyso\.mainsdk\.core\.MainSDKService\)}.*#\1#p' | sort -u); do
+      am stopservice -n "$svc" >/dev/null 2>&1
+      am startservice -n "$svc" >/dev/null 2>&1
+    done
+  fi
+  [ -f /cache/carlife/.mainaibox_toast_ignored ] && appops set com.carsyso.main TOAST_WINDOW default >/dev/null 2>&1 || true
+  rm -f /cache/carlife/.mainaibox_disabled /cache/carlife/.mainaibox_hidden /cache/carlife/.mainaibox_toast_ignored /cache/carlife/.boot_pending /cache/carlife/.boot_failed /cache/carlife/.reenable_tried
 ) &
 EOF
 
